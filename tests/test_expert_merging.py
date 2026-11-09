@@ -5,15 +5,19 @@ Description: Rigorous test harness evaluating the Expert Merging & Parameter Pru
 across DARE stochastic pruning, TIES sign consensus, SVD rank compaction,
 and multi-domain parameter consolidation retention benchmarks.
 """
-
 import os
 import sys
+_core_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core"))
+_bench_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
+if _core_dir not in sys.path:
+    sys.path.insert(0, _core_dir)
+if _bench_dir not in sys.path:
+    sys.path.insert(0, _bench_dir)
+
+
 from typing import List, Dict, Tuple
 import time
 import numpy as np
-
-# Ensure core is on Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
 
 from expert_merging_engine import ExpertMergingEngine, MergedExpertMetadata
 

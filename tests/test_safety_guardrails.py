@@ -5,15 +5,19 @@ Description: Rigorous test harness evaluating the Continual Safety & Alignment G
 across safety manifold calibration, mathematical orthogonality guarantees,
 safety-anchored dreaming, and zero jailbreak drift under sequential domain updates.
 """
-
 import os
 import sys
+_core_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core"))
+_bench_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
+if _core_dir not in sys.path:
+    sys.path.insert(0, _core_dir)
+if _bench_dir not in sys.path:
+    sys.path.insert(0, _bench_dir)
+
+
 from typing import List, Dict, Tuple, Optional
 import time
 import numpy as np
-
-# Ensure core is on Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
 
 from safety_guardrail_engine import SafetyGuardrailEngine
 

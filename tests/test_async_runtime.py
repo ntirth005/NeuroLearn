@@ -5,16 +5,20 @@ Description: Rigorous test harness evaluating the Asynchronous Distributed Runti
 across non-blocking IPC buffers, zero-downtime hot-swapping latency (< 1.0ms SLA),
 and concurrent serving throughput under background sleep consolidation.
 """
-
 import os
 import sys
+_core_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core"))
+_bench_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
+if _core_dir not in sys.path:
+    sys.path.insert(0, _core_dir)
+if _bench_dir not in sys.path:
+    sys.path.insert(0, _bench_dir)
+
+
 from typing import List, Dict, Any
 import time
 import threading
 import numpy as np
-
-# Ensure core is on Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
 
 from async_runtime_engine import SharedMemoryRingBuffer, LiveInferenceWorker, BackgroundSleepWorker
 from autonomous_latent_router import AutonomousLatentRouter

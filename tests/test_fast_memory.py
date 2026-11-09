@@ -3,14 +3,19 @@ SYNAPSE Continual Learning Framework - Phase 1: Test Suite & Validation Benchmar
 Module: test_fast_memory.py
 Description: Unit tests, associative recall benchmark, and latency telemetry for Tier 1 Fast Neural Memory.
 """
-
 import os
+import sys
+_core_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core"))
+_bench_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
+if _core_dir not in sys.path:
+    sys.path.insert(0, _core_dir)
+if _bench_dir not in sys.path:
+    sys.path.insert(0, _bench_dir)
+
+
 import sys
 import time
 import numpy as np
-
-# Ensure core is on Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
 
 # Import SYNAPSE Phase 1 modules
 from titans_nltm import TitansNLTM

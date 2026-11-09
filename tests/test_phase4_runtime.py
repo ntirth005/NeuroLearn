@@ -4,15 +4,18 @@ Module: test_phase4_runtime.py
 Description: Unit tests and empirical verification of Phase 4 Model Registry,
 Zero-Downtime Hot-Swapping, and the TRACE Continual Learning Benchmark.
 """
-
 import os
 import sys
+_core_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core"))
+_bench_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
+if _core_dir not in sys.path:
+    sys.path.insert(0, _core_dir)
+if _bench_dir not in sys.path:
+    sys.path.insert(0, _bench_dir)
+
+
 import time
 import numpy as np
-
-# Ensure core and benchmarks are on Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "benchmarks")))
 
 from model_registry_service import ModelRegistryService
 from trace_benchmark_runner import TRACEBenchmarkRunner

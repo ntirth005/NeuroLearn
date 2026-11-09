@@ -4,14 +4,18 @@ Module: test_dreaming_engine.py
 Description: Unit tests and empirical verification of Phase 3 Dreaming Engine,
 Synthetic Curriculum Generation, and ReST-EM Optimization.
 """
-
 import os
 import sys
+_core_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core"))
+_bench_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
+if _core_dir not in sys.path:
+    sys.path.insert(0, _core_dir)
+if _bench_dir not in sys.path:
+    sys.path.insert(0, _bench_dir)
+
+
 import time
 import numpy as np
-
-# Ensure core is on Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
 
 from dreaming_engine import DreamingEngine, SyntheticDream
 from rest_em_optimizer import ReSTEMOptimizer, CompositeRewardVerifier
