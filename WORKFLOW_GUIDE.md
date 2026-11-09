@@ -22,22 +22,24 @@ This repository is organized into three independent milestones that build upon e
 
 ---
 
-## 2. Remote Configuration (GitHub / GitLab)
+## 2. Remote Configuration (Dual Push to GitHub & GitLab)
 
-If you haven't yet pushed the repository to GitHub or GitLab, run:
+The repository is configured with dual-push for `origin`:
+- **`github`**: `https://github.com/ntirth005/NeuroLearn.git`
+- **`gitlab`**: `git@gitlab.com:ntirth005/neurolearn.git`
+- **`origin`**: Dual-push remote that pushes to **both** GitHub and GitLab in a single command.
+
+To push all baseline branches and tags to both remotes simultaneously:
 
 ```bash
-# 1. Add your remote origin (replace with your repository URL)
-git remote add origin git@github.com:USERNAME/REPOSITORY.git
-# or: git remote add origin https://github.com/USERNAME/REPOSITORY.git
-
-# 2. Push all milestone branches and baseline tags
 git push -u origin milestone-1
 git push -u origin milestone-2
 git push -u origin milestone-3
 git push -u origin master
-git push --tags
+git push origin --tags
 ```
+
+*(You can also push to an individual remote specifically using `git push github <branch>` or `git push gitlab <branch>` if needed.)*
 
 ---
 
