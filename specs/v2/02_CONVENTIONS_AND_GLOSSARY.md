@@ -65,9 +65,9 @@ neurolearn/
   slabs/                        # P02 (train.py: P03)
     slab.py  gate.py  slab_linear.py  context.py  hotset.py  algebra.py  io.py  train.py
   teach/                        # P03
-    derive.py  filters.py  probes.py  batches.py  anchor.py
+    derive.py  filters.py  probes.py  batches.py  anchor.py  anchor_seed.jsonl
   runtime/                      # P04
-    engine.py  session.py  router.py  surprise.py  worker.py
+    base.py  engine.py  session.py  router.py  surprise.py  worker.py
   consolidate/                  # P05–P08
     write_l1.py  daily.py  sweep.py  compact.py  forget.py  supersede.py
   exec/                         # P09
@@ -81,7 +81,7 @@ neurolearn/
     experiments/                # one script per experiment in P12 §2
     public/                     # P13 benchmarks and reproduced baselines
 tests/
-  unit/  integration/  fixtures/
+  unit/  integration/  fixtures/  slow/   # slow/: real weights, run with `pytest -m slow`; helpers.py, tiny.py
 configs/
   dev.yaml  gpu24.yaml  target.yaml
 data/                           # runtime data, git-ignored (layout in P01 §2)

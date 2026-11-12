@@ -108,6 +108,11 @@ after each. "Files" lists where a canary was still found.
 - This build's default is `secure_delete = 1`; the spec sets it explicitly and does not rely on that.
 - Not covered: the storage medium below the file system, and long values split across overflow
   pages (the canaries were short on purpose). Basis for D-38.
+- Added at T0.3: with FTS5 `secure-delete` on, FTS5's `integrity-check` command reports
+  `database disk image is malformed` after deletes while every query stays correct (120 of 300
+  rows deleted: 0 of 40 terms disagreed with the content table). `optimize` and `rebuild` clear
+  the report. A health check of the index must compare query results with the content table, as
+  `tests/helpers.py::assert_fts_consistent` does (D-51).
 
 ### 3.6 Fourth-review checks (2026-11-12)
 

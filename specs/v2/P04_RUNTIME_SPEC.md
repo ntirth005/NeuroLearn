@@ -5,8 +5,8 @@ update slabs without disturbing generation.
 **Phase:** P2 (T2.1–T2.4), routing over centroids in P3 (T3.4)
 **Depends on:** P01, P02
 **Provides to:** P05, P06, P09, P11
-**Code:** `neurolearn/runtime/` — `engine.py`, `session.py`, `router.py`, `surprise.py`, `worker.py`
-**Status:** specified, not implemented
+**Code:** `neurolearn/runtime/` — `base.py` (frozen-base loader, tokenizer adapter), `engine.py`, `session.py`, `router.py`, `surprise.py`, `worker.py`
+**Status:** T0.5 implemented: base loader, sessions, prompt layout, KV-cached decode loop, `chat`, `answer`, `ingest_file` (synchronous). Not yet: slabs, routing, worker, safe-point commits, tools.
 
 ---
 
@@ -49,6 +49,9 @@ The context is **append-only** so the KV prefix stays valid:
 ```
 
 - Recalled chunks are attached to the turn that triggered them. Nothing is inserted earlier.
+- A user turn always wraps the user's words in `<message>…</message>`; a `<memory>` block precedes
+  it only when there are chunks to show. Chunks of entries already in the context verbatim (this
+  session's own messages and replies) are never recalled into it (D-52).
 - The date has day granularity. A session that crosses midnight is ended and restarted at the
   next turn (this is a safe point).
 - When `len(token_ids)` would exceed `base.context_tokens`, the oldest turns are dropped (they are

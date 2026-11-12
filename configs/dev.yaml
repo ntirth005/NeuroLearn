@@ -1,0 +1,135 @@
+profile: dev
+
+paths:
+  data_dir: data
+
+ledger:
+  busy_timeout_ms: 5000
+  ingest_batch_chunks: 16
+  secure_delete: true           # PRAGMA secure_delete=ON and FTS5 'secure-delete' (P01 §4.7); do not turn off
+
+base:
+  model_id: Qwen/Qwen2.5-0.5B-Instruct
+  device: cpu
+  dtype: float32
+  quantization: none            # none | 4bit
+  context_tokens: 32768
+
+encoder:
+  model_id: BAAI/bge-small-en-v1.5   # any small frozen sentence encoder; verify availability at T0.4
+  dim: 384
+
+slabs:
+  rank: 8
+  fast_rank: 16
+  modules: [q_proj, v_proj]
+  slots: 16
+  top_k: 4
+  tau: 0.5                      # must be <= 1 (P02 §4.1)
+  phi_init: -1.1                # open-start: gate ~0.9 at chance level; closed-start would be 1.386
+  delta: 0.1                    # ramp cut: gate is exactly 0 below this, in training and inference
+  gate: rowspace                # rowspace | keyed | competitive
+  input_norm: standardize       # standardize | none
+  max_cap_binding: 0.05         # E-GATE pass condition: share of tokens on which the cap may bind
+  m_ref_std_floor: 0.1          # floor on a slab's own-domain margin std in the cap ranking
+  gate_deflate_rank: 0          # experimental: principal directions removed from the gate (P02 §2.1); E-GATE tries 8
+
+teacher:
+  mode: model                   # model | oracle
+  max_new_tokens: 96
+  answerable_nll: 1.5
+  consistency_f1: 0.0           # 0 disables the filter; 0.6 on gpu profiles
+  novelty_kl: 0.05
+  rule_cloze: true
+  min_accept_rate: 0.1
+  probe_frac: 0.2
+  min_probes_per_entry: 2
+  probe_pass_ratio: 0.5
+
+train:
+  seed: 0
+  lr_slab: 1.0e-4
+  epochs: 4
+  batch_tokens: 2048
+  max_seq_tokens: 512
+  max_grad_norm: 1.0
+  lambda_raw: 0.5
+  lambda_replay: 0.5
+  lambda_anchor: 1.0
+  lambda_safety: 1.0
+  min_real_token_frac: 0.25
+  weight_decay: 0.0             # applied to B only, if set
+  neighbour_replay: false
+
+write:
+  surprise_z: 1.5
+  max_entry_tokens: 512
+  derived_per_entry: 6
+  lr_fast: 1.0e-3
+  fast_steps: 6
+  fast_momentum: 0.9
+  fast_decay: 0.01
+  fast_norm_cap: 0.05
+  ring_size: 64
+
+consolidate:
+  idle_s: 900
+  assign_cos: 0.55
+  max_open_slabs: 8
+  slab_capacity_tokens: 50000
+  derived_per_entry: 20
+  neighbours: 3
+  min_new_recall: 0.6
+  min_retention: 0.95
+  max_anchor_kl: 0.02
+  max_gate_leak: 0.02
+  min_refusal_agreement: 0.98
+  rollout_probes: 8
+  min_rollout_match: 0.5
+  routing_centroids: 4
+  sweep_sample: 20
+
+compact:
+  prune_energy: 0.99
+  pack_centroid_cos: 0.8        # similarity of source-text centroids, not of weights
+  cofire_min: 0.3
+  max_merged_blocks: 4
+  max_crosstalk_kl: 0.02        # merged slab vs its two parents, on each parent's probes and on anchor text
+  archive_days: 90
+  archive_access_ema: 0.001
+  keep_originals_cycles: 1
+
+forget:
+  contradiction_margin: 2.0
+  restate_cos: 0.85             # dense cosine above which another entry is offered as a restatement
+  residual_margin: 0.05         # behavioural removal: probe score may exceed the bare base's by at most this
+
+safety:
+  eval_rows: 100                # rows decoded per commit test, balanced by category
+  decode_tokens: 96
+  min_benign_agreement: 0.95
+  max_reply_nll_gap: 0.5        # nats per token, base likelihood of the candidate's reply vs of its own
+  max_leak_rate: 0.02
+
+eval:
+  run_budget_hours: 48          # planning budget per required run on this profile (G-0)
+
+runtime:
+  idle_swap_s: 120
+  allow_stale_commit: false
+  route_top_n: 8
+  warm_slabs: 64
+  worker_mode: thread           # thread | process
+  serve_threads: 8
+  worker_threads: 4             # process mode only
+  max_step_s: 2.0
+
+recall:
+  top_k: 6
+  chunk_tokens: 256
+  rrf_k: 60
+
+exec:
+  grammar: true
+  delimiter_weight: 2.0
+  max_repair_attempts: 1        # re-decodes of a call that fails post-decoding validation (json-level tools)

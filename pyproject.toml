@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neurolearn"
+version = "2.0.0.dev0"
+description = "Neurolearn v2.0: local continual-learning system"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "torch",
+  "transformers",
+  "safetensors",
+  "numpy",
+  "pyyaml",
+  "sentence-transformers",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["neurolearn*"]
+
+[tool.setuptools.package-data]
+neurolearn = ["ledger/schema.sql", "teach/anchor_seed.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `slow` tests load real weights (and may download them): run them with `pytest -m slow`
+addopts = "-m 'not slow'"
+markers = [
+  "tiny: randomly initialised 2-layer Qwen-architecture model, no download",
+  "slow: real Qwen2.5-0.5B weights",
+]

@@ -523,6 +523,94 @@ then confirm or replace), `superseded`.
   the specific remedies and figures are recorded as unverified.
 - **Status:** decided for precision and the floor; the rest needs-test (T5.1).
 
+### D-51 Ledger: user-scoped candidate lists, a FIFO writer lock, and rules enforced in code (T0.3)
+- **Decision:** (1) Recall restricts both candidate lists to the user's `active`/`pending` entries
+  and drops excluded chunk ids *before* taking the top 50, not after (`P01` §4.4). The in-memory
+  index carries an owner code per row for this. "Or is shared" is removed from §4.4: no spec
+  defines a shared entry, so recall is per user. (2) In-process writers queue on a FIFO lock
+  before `BEGIN IMMEDIATE` (`P01` §4.6). (3) The rules of `P01` §3.1 and §4.6 that were tests
+  only are enforced in code: a write outside `BEGIN IMMEDIATE`, an encoder or tokenizer call
+  inside a write transaction, a derived row citing an untrainable or non-live entry, and linking
+  such an entry to a slab all raise. (4) `Ledger` takes the config as a fourth argument.
+- **Why:** (1) With several users the global top 50 can hold none of one user's chunks, so the
+  dense list would be empty for them although the data exists. (2) SQLite's busy handler polls
+  with growing sleeps and is not fair. Measured: with the lock removed, a chat append made one
+  attempt during a 2,000-chunk file ingest and starved (I-P01-8 failed, 1 turn instead of 250);
+  with it the slowest chat append was 16 ms. Cross-process writers still rely on the busy
+  timeout and `BEGIN IMMEDIATE`; two `Ledger` objects on one database did 2 x 400 read-then-write
+  appends with no lock error. (3) Hard rules 4 and 5 and D-47 are cheaper to keep when the
+  ledger refuses the call than when a test notices later. (4) `ledger.*` and `recall.*` keys
+  must reach the ledger (`02` §4: no literals).
+- **Evidence:** `tests/unit/test_ledger*.py`, `test_embedding_store.py`; mutation checks run by
+  hand: removing the user filter, the status filter, the FIFO lock, the zeroing of removed rows,
+  or the checkpoint each fails a named test.
+- **Also measured:** with FTS5 `secure-delete` on, FTS5's own `integrity-check` command reports
+  `database disk image is malformed` after any delete, although every query is correct (0 of 40
+  terms disagreed with the content table after 120 deletes); `optimize` clears it. Do not use
+  `integrity-check` as a health check between optimises (`05` §3.5).
+- **Status:** decided.
+
+### D-52 Engine details fixed at T0.5
+- **Decision:** (1) The recall for a turn excludes chunks of entries that are already in the
+  session's context verbatim (its own user messages and replies), as well as chunks already
+  recalled into it. (2) The user's words are always wrapped in `<message>`; `<memory>` appears
+  only when there are chunks. (3) The KV cache covers `token_ids[:kv_len]`; the closing tokens of
+  an assistant turn are appended without a forward pass and enter the cache with the next
+  prefill. (4) A turn that fails or whose reply is abandoned is rolled back: tokens removed, cache
+  discarded (re-prefill next turn); the user's message stays in the ledger. (5) `Engine` takes the
+  model, tokenizer, ledger, embedder and clock as optional arguments, so tests can inject the
+  `tiny` model; with none given it loads from the config. (6) `session_id=None` means the user's
+  current session; a session that crosses midnight is restarted under the same id.
+- **Why:** (1) Without it a turn's memory block repeats the conversation it sits in. Measured on
+  the real base: the first run recalled the assistant's own earlier reply into the next turn and
+  the 0.5B model copied it. Replies remain recallable across sessions (L-2). (3) Saves a forward
+  over two tokens per turn and keeps `kv_len` the single truth about the cache. (4) The ledger
+  must keep every real input (hard rule 3), but the context must match its cache.
+- **Evidence:** `tests/unit/test_engine.py` (tiny): I-P04-5, 6, 8, 13 and I-P11-3; eight
+  deliberate breakages each fail a test. `tests/slow/test_engine_real.py` (Qwen2.5-0.5B on CPU):
+  incremental vs full-forward logits differ by at most 5.9e-5 with the same argmax; about 15
+  tokens/s decode including recall.
+- **Status:** decided.
+
+### D-53 Synthetic-user details fixed at T0.6
+- **Decision:** (1) **I-P11-8 (10% cap on the largest cluster)** is enforced for categories with at
+  least 20 clusters in the stream. For a category with fewer clusters the cap cannot be met: with
+  `n` clusters the largest holds at least `1/n` of the questions (style: 10 rules, so at least
+  10%, and exactly 10% only when every rule is asked equally often; tool: 5 tools, at least
+  20%). Their figure is still computed and written to the report, and §5.1's rule stands that a
+  category with fewer than 10 clusters is reported without pass/fail and left out of the guard.
+  (2) **Stream shape lives in `StreamParams`** (turn-type weights, session and turn counts, restate
+  share, the forget-twice share, how early jargon and (owner, port) pairs arrive), not in the
+  config: they describe the benchmark, are fixed with the seed, and are written into `truth.json`.
+  The weights give about 1.3 new facts per cycle, so the world's ~270 stated facts last 200
+  cycles. (3) **Jargon facts and each project's (owner, port) pair arrive earlier on average**
+  (a priority of 0.35 on a random sort key), so that `jargon` and `multi` reach 10 clusters in a
+  50-cycle run. (4) **A forget request names its entry by date, object and attribute, never the
+  value**, so the request entry holds nothing the byte search would flag. Only facts stated in
+  chat turns and never updated can be forgotten (a file entry holds ~10 other facts). The share
+  of forgets that target a twice-stated fact is exact in sequence: request `k` is of that kind
+  when `floor((k+1)·0.4) > floor(k·0.4)`; when no such fact exists yet the turn restates a fact
+  instead and the same `k` is tried again. Facts stated twice are not updated. (5) **The probe
+  paraphrase set** that §2.3 calls "a further held-out set" is two paraphrases per attribute,
+  separate from the three question paraphrases. (6) The anchor questions asked in evaluation are
+  a fixed list of 40, none of which is in `anchor_seed.jsonl` (checked by a test); style
+  evaluation prompts are a separate list from the oracle teacher's prompts.
+- **Why:** (1) A cap that no stream can meet would fail every run for a reason that says nothing
+  about the clusters. (2) `03` has no section for benchmark shape and the config is for the
+  system under test. (3) Without it (priority 1.0) a 50-cycle stream gave 5 to 9 `jargon` clusters on every seed
+  and 7 to 12 `multi`, below the guard's minimum on most seeds (with it: `jargon` 14 to 19,
+  `multi` 10 to 18; first run: `multi` 3 to 6 clusters even at
+  200 cycles, which was a bug in the question builder: it dropped a pair if its port was ever
+  updated, instead of from the update on). (4) A request that quoted the fact would plant the
+  value in the ledger just after it was meant to be gone.
+- **Evidence:** `tests/unit/test_synthetic_user.py` (50 tests; I-P11-1, 2, 6, 8, plus truth-table,
+  gold-answer, forget-request, tool, style and oracle-row checks); 15 deliberate breakages each
+  fail a named test (one first survived because the mutation did not change the cluster, and one
+  needed a planted collision test). Cluster counts at 50 cycles, seeds 0 to 2: `jargon` 14 to 19,
+  `multi` 10 to 18 (seed 2 at 10, the minimum), `style` 10, `fact` 28 to 41; at 200 cycles every
+  category except `style` and `tool` has at least 26 clusters and a largest share of at most 8.7%.
+- **Status:** decided.
+
 ### Fourth review: items not adopted as defaults
 - **Per-module rank and a shared gate per attention layer (3C).** The premise is overstated: a
   rank-8 update of `q_proj` reaches every query head, and the 32B model has 40 heads, not 64.

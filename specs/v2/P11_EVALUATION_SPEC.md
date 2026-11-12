@@ -6,7 +6,7 @@ worth keeping.
 **Depends on:** P01; later the whole system through `Engine`
 **Provides to:** every phase gate
 **Code:** `neurolearn/eval/` — `synthetic_user.py`, `baselines.py`, `metrics.py`, `run.py`, `report.py`
-**Status:** specified, not implemented
+**Status:** `synthetic_user.py` implemented (T0.6); the rest specified, not implemented
 
 ---
 
@@ -38,6 +38,9 @@ Generated from a seed. Everything is fictitious so the base cannot know it.
 Sizes are chosen so that every category has enough independent clusters for §5.1 (a `multi`
 question belongs to the project whose attribute is its answer, a `style` question to one rule),
 and enough facts for 200 cycles. Every object has a stable `object_id`.
+Shape constants of the stream (`StreamParams`) and the held-out probe paraphrases (two per
+attribute) are fixed in D-53. The world has about 270 facts that can be stated, so a stream
+introduces about 1.3 new facts per cycle.
 
 A **fact** is one attribute of one object, with a stable `fact_id`, three statement paraphrases,
 three question paraphrases, a gold short answer, and a category. Every evaluation question
@@ -58,7 +61,7 @@ by X use?"), `style`, `updated`, `forgotten`, `tool`.
 | `filler` | generic chat unrelated to the world |
 | `ingest_file` | a document containing ~10 facts |
 | `update_fact` | user states a new value for an earlier fact |
-| `forget_request` | user asks to forget an earlier fact; a fixed share of these target a fact that was stated twice, in two entries with different wording, and name only one of them (P08 §3.3) |
+| `forget_request` | user asks to forget an earlier fact, naming the entry by date, object and attribute but not the value; a fixed share (0.4) of these target a fact that was stated twice, in two entries with different wording, and name only one of them (P08 §3.3; D-53) |
 | `tool_task` | request that requires one of the tools |
 | `style_rule` | user states or repeats a style rule |
 
@@ -291,6 +294,6 @@ table then lists, and T0.8 is repeated on the GPU profile at T5.1.
 | I-P11-4 | The bare base scores at chance on `fact` questions with recall off (the world is unknown to it). | slow |
 | I-P11-5 | All systems receive identical streams and identical evaluation questions. | unit |
 | I-P11-6 | Every evaluation question carries its `fact_id`s and its answer's `object_id`; cluster assignment is a deterministic function of `truth.json`; a `multi` question is in exactly one cluster, that of its answer's object. | unit |
-| I-P11-8 | In every generated stream the largest cluster holds at most 10% of the questions of its category, and the figure is written to the report. | unit |
+| I-P11-8 | In every generated stream the largest cluster holds at most 10% of the questions of its category, for categories with at least 20 clusters (below that the cap cannot be met, D-53); the figure is written to the report for every category. | unit |
 | I-P11-9 | On synthetic results with no true difference in any of 7 categories, the guard fails in at most 5% of 2,000 simulated runs; the uncorrected per-seed rule fails in far more, and both rates are reported by the test. | unit |
 | I-P11-7 | On a synthetic result set with perfectly correlated duplicates of each question, the cluster bootstrap interval has the same width as without the duplicates, and the per-question bootstrap is narrower. | unit |

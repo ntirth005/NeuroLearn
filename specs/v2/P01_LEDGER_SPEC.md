@@ -5,7 +5,7 @@
 **Depends on:** nothing
 **Provides to:** every other pillar
 **Code:** `neurolearn/ledger/` — `schema.sql`, `store.py`, `chunker.py`, `embed.py`, `recall.py`
-**Status:** specified, not implemented
+**Status:** implemented (T0.3: ledger, chunker, in-memory index and recall; T0.4: real encoder)
 
 ---
 
@@ -212,7 +212,7 @@ and stored as float16. At start-up all chunk embeddings with an `active` or `pen
 loaded into an in-memory store (`EmbeddingStore`):
 
 - **Storage:** a list of fixed-size `float32` blocks of 16,384 rows, a parallel chunk-id array,
-  and a boolean validity mask. Appending writes into the last block and allocates a new block
+  an owner code per row (one per user, for the recall filter), and a boolean validity mask. Appending writes into the last block and allocates a new block
   when it is full; existing blocks are never reallocated or copied.
 - **Removal:** clear the validity bit **and zero the row** (a forgotten embedding must not stay
   in memory). No compaction during interaction; blocks are compacted when idle if more than a
@@ -224,24 +224,29 @@ re-embed every chunk and recompute every slab centroid.
 
 ### 4.4 `recall(user, query, k, exclude_chunk_ids) -> list[Chunk]`
 
+Both candidate lists are restricted **before** the top 50 is taken to chunks whose entry belongs
+to `user`, has status `active` or `pending`, and whose id is not in `exclude_chunk_ids` (D-51;
+filtering afterwards could leave a user with no candidates). Recall is per user: no spec defines a
+shared entry.
+
 1. BM25: FTS5 query built from the query's word tokens, each quoted and OR-joined; top 50.
-2. Dense: cosine against the in-memory matrix; top 50.
+2. Dense: cosine against the in-memory matrix, restricted to the user's rows; top 50.
 3. Fuse by reciprocal rank: `score(c) = Σ_lists 1 / (recall.rrf_k + rank_list(c))`.
-4. Keep chunks whose entry belongs to `user` (or is shared), has status `active` or `pending`,
-   and whose id is not in `exclude_chunk_ids`. At most two chunks per entry.
+4. Keep at most two chunks per entry; re-check the entry's user and status when the chunk rows
+   are read, so a stale index row cannot return content.
 5. Return the top `k`, each with its entry date and source, ordered newest first.
 
 ### 4.5 Provenance and bookkeeping
 
 | Method | Returns / effect |
 |---|---|
-| `add_derived(rows, source_entry_ids)` | Inserts derived rows and their sources. |
-| `samples_for(slab_id)` | Non-probe derived rows whose sources are all `active`/`pending` entries in `slab_sources(slab_id)`, plus those entries' raw text. |
+| `add_derived(rows, source_entry_ids)` | Inserts derived rows and their sources. Raises if a source is missing, not `active`/`pending`, or not trainable (hard rule 5). |
+| `samples_for(slab_id)` | A `SlabSamples(derived, entries)`: non-probe derived rows whose sources are all live, trainable `primary` entries of the slab, and the raw text of the slab's live, trainable `primary` entries. |
 | `probes_for(slab_id)` | Probe rows on the same condition. |
-| `unconsolidated(namespace)` | Trainable `active`/`pending` entries with no `primary` row in a non-retired level ≥ 2 slab (L-6). `replay` rows and rows of retired slabs do not count. |
-| `link(slab_id, entry_ids, role='primary')` | Inserts `slab_sources` rows. For `primary`: adds token counts to `real_tokens` and raises if the entry already has a primary owner (L-6). For `replay`: no other effect. |
+| `unconsolidated(namespace)` | `namespace` is `knowledge/<user>`; returns that user's trainable `active`/`pending` entries with no `primary` row in a non-retired level ≥ 2 slab (L-6). `replay` rows and rows of retired slabs do not count. |
+| `link(slab_id, entry_ids, role='primary')` | Inserts `slab_sources` rows; raises for an entry that is not live or not trainable. For `primary`: adds token counts to `real_tokens` and raises if the entry already has a primary owner (L-6). For `replay`: no other effect. Linking an existing pair again changes nothing; under the other role it raises. |
 | `set_probe_scores(slab_id, scores, at_commit)` | Upserts `probe_scores`. |
-| `bump_access(gate_mass: dict[slab_id, float])` | Updates `access_ema`, `last_access_ts`, and `cofire` for every pair with mass above zero. EMA factor 0.05. |
+| `bump_access(gate_mass: dict[slab_id, float])` | One entry per slab loaded this turn; open means mass > 0. `access_ema` moves toward 1 (open) or 0 (loaded, closed) with factor 0.05 and `last_access_ts` is set when open. Every pair of loaded slabs moves its `cofire` average toward 1 if both are open, else toward 0; a pair is stored from the first turn both are open. Slabs not loaded this turn are untouched, so an unloaded slab's `access_ema` does not decay (P07 §8 must allow for that). |
 | `mark_superseded(old_id, new_id) -> list[slab_id]` | Sets status and `supersedes_id`; returns level ≥ 1 slabs in `slab_sources(old_id)`. |
 | `wipe(entry_id) -> list[slab_id]` | Forget, logical step: sets `text=''`, `sha256=''`, status `forgotten`; deletes its chunks, FTS rows (FTS5 `'delete'` command with the old text) and in-memory embeddings; deletes every derived row citing it (and their `derived_sources`, `probe_scores`); returns affected slabs (all roles, retired included). Not sufficient on its own: see §4.7. |
 | `erase_residue(canaries) -> ErasureReport` | Forget, physical step (§4.7). |
@@ -261,6 +266,11 @@ Each thread opens its own connection with `PRAGMA busy_timeout = ledger.busy_tim
 - **No file is copied, written, renamed or deleted inside a write transaction.** Slab files and
   `_originals` copies are placed first; the transaction changes metadata only; clean-up follows.
 
+- **In-process writers queue on a FIFO lock before `BEGIN IMMEDIATE`** (D-51). SQLite's busy
+  handler is not fair: a thread that re-takes the write lock between batches can starve another
+  for the whole timeout. Measured: without the lock a chat append got one turn in during a
+  2,000-chunk ingest; with it the slowest was 16 ms. Writers in other processes still wait on
+  the busy timeout.
 - **Readers are not blocked by a writer in WAL mode, including on the FTS5 table.** Measured on
   this machine (SQLite 3.45.1): 1,438 FTS queries completed with no error and a 14 ms maximum
   while another connection held a 20,000-row FTS write transaction (`05` §3.4).
@@ -321,7 +331,7 @@ class Chunk:  id: int; entry_id: int; text: str; ts: str; source: str; score: fl
 class Derived: id: int; kind: str; prompt: str; answer: str; source_ids: tuple[int, ...]
 
 class Ledger:
-    def __init__(self, data_dir: str, embedder: Embedder, tokenizer): ...
+    def __init__(self, data_dir: str, embedder: Embedder, tokenizer, config: Config, *, clock=None): ...
     def append(self, user: str, source: str, text: str, ts: str, session_id: str | None = None,
                trainable: bool = True) -> int: ...
     def recall(self, user: str, query: str, k: int, exclude_chunk_ids: set[int] = frozenset()) -> list[Chunk]: ...

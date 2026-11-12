@@ -1,2 +1,9 @@
 # Combined exports of the spec set (made for pasting elsewhere); the files in specs/v2/ are the source of truth
 specs/v2/*_combined.txt
+
+# Runtime data and environment
+data/
+.venv/
+*.egg-info/
+__pycache__/
+.pytest_cache/
