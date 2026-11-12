@@ -213,7 +213,8 @@ then confirm or replace), `superseded`.
   `compact.pack_cos` is renamed `compact.pack_centroid_cos`.
 - **Why:** External review read `pack_cos` as weight cosine (it is source-text similarity) and
   argued packing would never fire. The misreading showed the name was unclear; the worry that
-  lossless packing is rare is fair. Concatenation is exact and always available.
+  lossless packing is rare is fair. Concatenation is weight-exact and always available
+  (gating is not preserved; see D-45).
 - **Consequence:** total parameters on disk are not bounded; memory in use is (`P07` §9).
 - **Status:** decided.
 
@@ -379,7 +380,7 @@ then confirm or replace), `superseded`.
   lags, with recall on and off, and inside two-hop questions, so questions are not independent.
   Part B: `P13` §3 already required same-model baselines, but `06` §3 item 2 still allowed
   published numbers to stand in; that alternative is removed.
-- **Status:** decided.
+- **Status:** decided. The cluster definition is refined by D-49.
 
 ### D-41 Kill criterion G-K: one rule, one predeclared primary metric
 - **Decision:** The primary metric is the **unweighted mean of recall-on accuracy on `jargon`,
@@ -425,6 +426,111 @@ then confirm or replace), `superseded`.
   E-GATE); full whitening stays not adopted.
 - **P05, L1 may add little over retrieval.** True and already stated (`P05` §1); E-L1 decides.
   No change.
+
+### D-43 The gate ramp is kept; dead gates are detected and reset
+- **Decision:** `w = max(0, (s − δ)/(1 − δ))` stays. `train_slab` resets `φ` when a slab's gate is
+  0 on every own-sample token of a batch. The text on gradient bounds in `P02` §4.1 is corrected.
+- **Why:** Fourth external review (2026-11-12), items 1A and 1B, each checked.
+  *1A:* the review's formula is right (`dw/de ≈ 1,154` at the cut) and its conclusion is not. The
+  number is large because `e` is about `1.7e-4` there; in log-lift units the slope is `δ/τ = 0.2`,
+  and the gradient reaching `A` is at most 52 per token, with no overflow in any dtype. The cut
+  is a kink like a ReLU's. The review is right that the old text argued about `e → 0`, which the
+  cut makes irrelevant; that text is fixed.
+  *1B:* the stated mechanism does not occur. With `B = 0` the anchor and safety losses are at
+  their minimum and give `φ` no gradient, and at `lr_slab = 1e-4` `φ` cannot move the 2.2 units
+  needed in a few steps. The end state is real, though: a fully closed gate has no gradient and
+  nothing detected it before the commit test failed.
+- **Not adopted:** a smooth (`C¹`) ramp; freezing `φ` during warm-up by default. A slower `φ`
+  schedule is an E-GATE arm.
+- **Status:** decided; E-GATE reports dead-gate resets.
+
+### D-44 Retraction details: positive `R`, no row-space step, decay on `B` only
+- **Decision:** QR results are sign-normalised so `R` has a positive diagonal. The part of each
+  `A` step that lies in the old row space is dropped before retraction. Weight decay and the
+  fast slab's decay apply to `B` only.
+- **Why:** Fourth review, items 1C and 1E, and runtime item 2B. Checked numerically (`05` §3.6):
+  a canonical `A` that came from an SVD gave a negative diagonal in every trial, so `R ≈ I` was
+  false after prune or pack; dropping the row-space part cuts `|R − I|` by a factor of ten;
+  decaying both factors decays the update by `(1 − γ)²` and leaves `A` unchanged.
+  Corrections to the review: `B A` was preserved even with the wrong sign, and a row-space step
+  does not "pump" `‖B‖` artificially, it is simply a direction `B` already owns. The claim that
+  weight decay erodes old facts "over months" does not apply to sealed slabs, which are never
+  stepped; weight decay was unspecified and is now 0 by default.
+- **Status:** decided. Adam's second moments remain untransformed (D-29).
+
+### D-45 Packing is weight-exact, not behaviour-exact
+- **Decision:** No merge is called lossless. Pack, concatenate and prune are accepted only if a
+  cross-talk check passes: KL between the model with the parents and with the merged slab, on
+  each parent's probes and on anchor text, at most `compact.max_crosstalk_kl`.
+- **Why:** Fourth review, item 1D. True: one gate replaces two, so the merged slab applies one
+  parent's update on tokens where only the other used to fire. The retention test already ran,
+  but the specs said "no loss of content" and I-P07-8 claimed exactness without qualification.
+- **Status:** decided. The threshold is a starting value.
+
+### D-46 One slot pool, masked per session; sessions are parked, never overwritten
+- **Decision:** A forward pass applies only the current session's slabs and shared namespaces.
+  When the pool is full, another session is parked (cache dropped, slabs released).
+- **Why:** Fourth review, item 2A. The review's scenario (one user's slots overwritten under a
+  live cache) was already forbidden by D-27, but what should happen instead was not specified.
+  Checking it showed something worse that the review did not raise: with several sessions
+  live, one user's private slabs stayed loaded and their gates could open on another user's
+  tokens.
+- **Also:** context eviction now removes the dropped turns' chunks from the session's recalled
+  set (review item 2E, true).
+- **Status:** decided.
+
+### D-47 Write transactions are immediate and contain no file I/O; slab files are versioned
+- **Decision:** Every ledger write uses `BEGIN IMMEDIATE`. Files are placed before the
+  transaction and cleaned up after it. Slab files carry their version in the name.
+- **Why:** Fourth review, items 2B and 2D. 2D checked by test: a transaction that reads and then
+  writes failed at once, with a 5 s timeout set, after another connection committed
+  (`05` §3.6); `append` and `bump_access` have that shape. 2B is true and was introduced by the
+  previous revision of `P07` §5 (a file copy inside the commit transaction). Versioned names
+  make the crash cases recoverable: the ledger never points at a missing or half-replaced file.
+- **Status:** decided.
+
+### D-48 A superseding entry takes over its predecessor's slab
+- **Decision:** The rebuild triggered by a supersession includes the new entry, and links it to
+  the old entry's primary owner when the rebuild commits.
+- **Why:** Fourth review, item 2C. True in substance: the rebuilt slab held neither value until
+  a later consolidation assigned the new entry somewhere. The window was one consolidation
+  cycle, not "days", and recall served the new value throughout. The review's fix (link inside
+  `mark_superseded`) is not used: linking before training would record knowledge the weights do
+  not have (see `P04` §6.1).
+- **Status:** decided.
+
+### D-49 Clusters by answer object; one corrected guard
+- **Decision:** A question's bootstrap cluster is the object its answer belongs to, with no
+  chaining. The "not worse on any category" guard is one family of tests on seed-averaged
+  differences with Holm correction at 5%.
+- **Why:** Fourth review, items 3A and 3B. 3A: with the two-hop template in the spec, components
+  were one project each, not the 60–80% component the review predicts; but nothing bounded the
+  templates, and a person owning several projects would have linked them. 3B checked: 21
+  uncorrected checks give a 41% false-failure rate. Holm is chosen over the review's
+  Benjamini-Hochberg because one rejection fails the guard, so the family-wise rate is the one
+  that matters.
+- **Status:** decided. Refines D-40 and D-41.
+
+### D-50 Gate arithmetic in float32; floor on calibration spread; GPU hazards registered
+- **Decision:** Standardisation, norms, energies and margins are computed in `float32` on every
+  profile. The cap ranking uses `max(std, slabs.m_ref_std_floor)`. `gpu24` starts at a 16,384
+  token context. The remaining GPU hazards are listed in `P04` §11 with what T5.1 must measure.
+- **Why:** Fourth review, part 2. The precision point follows from `bfloat16` having 8
+  significant bits and needs no GPU to see. The calibration example in the review is wrong (a
+  token far below a narrow slab's mean ranks very low, not high), but a tiny spread does turn
+  small differences into decisive ones, so the floor is adopted. The KV-cache arithmetic was
+  recomputed (6.0 GiB at 32k). Fragmentation and launch overhead are plausible and unmeasured;
+  the specific remedies and figures are recorded as unverified.
+- **Status:** decided for precision and the floor; the rest needs-test (T5.1).
+
+### Fourth review: items not adopted as defaults
+- **Per-module rank and a shared gate per attention layer (3C).** The premise is overstated: a
+  rank-8 update of `q_proj` reaches every query head, and the 32B model has 40 heads, not 64.
+  The question is still fair, so both variants are E-MLP arms.
+- **Probe-aware pruning (runtime 2B).** Prune already runs the retention test on the slab's own
+  probes before it commits (`P07` §3).
+- **A fused custom kernel (runtime 1B).** Last in the list of remedies in `P04` §11, after
+  measurement.
 
 ---
 

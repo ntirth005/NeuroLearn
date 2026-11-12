@@ -222,14 +222,18 @@ def train_slab(model, shadow: Slab, plan: TrainPlan, cfg, should_yield: Callable
    the neighbour slabs (project out, then QR); `φ = slabs.phi_init`. Seed from the slab row.
 2. Enter `SlabContext(shadow=shadow, exclude_slots=<slots of its committed version>, train=True)`.
 3. AdamW on the shadow's `A`, `B`, `φ` only. `train.lr_slab`, cosine decay, `train.epochs` passes
-   over the new samples, gradient-norm clipping at `train.max_grad_norm`.
+   over the new samples, gradient-norm clipping at `train.max_grad_norm`. Weight decay is
+   `train.weight_decay` (0 by default) and is applied to `B` only: decay on `A` would be undone
+   by the retraction and reappear as extra decay on `B`, and decay on `φ` would open gates.
 4. Before every step call `should_yield()`; while it returns true, wait (P04 §7). Never hold a
    lock across a step.
-5. After **every** optimiser step: `retract` each module (P02 §4.3). The slab is canonical at all
-   times; nothing is differentiated through QR.
+5. After **every** optimiser step: `retract` each module (P02 §4.3), passing the pre-step `A`.
+   The slab is canonical at all times; nothing is differentiated through QR. Then the dead-gate
+   check (P02 §4.1): if the slab's gate weight was 0 on every token of the batch's new samples,
+   reset `φ` to `slabs.phi_init` for those modules and count it.
 6. After the last step: measure `m_ref` (mean and std of the slab's margin over its own training
-   tokens, per module; P02 §4.2). Return losses per term, step count, wall time, and the count of
-   rank-collapse repairs.
+   tokens, per module; P02 §4.2). Return losses per term, step count, wall time, the mean
+   own-sample gate weight, and the counts of rank-collapse repairs and dead-gate resets.
 
 Enable gradient checkpointing on GPU profiles if memory requires it. The base stays in eval mode.
 

@@ -42,6 +42,7 @@ slabs:
   gate: rowspace                # rowspace | keyed | competitive
   input_norm: standardize       # standardize | none
   max_cap_binding: 0.05         # E-GATE pass condition: share of tokens on which the cap may bind
+  m_ref_std_floor: 0.1          # floor on a slab's own-domain margin std in the cap ranking
   gate_deflate_rank: 0          # experimental: principal directions removed from the gate (P02 §2.1); E-GATE tries 8
 
 teacher:
@@ -68,6 +69,7 @@ train:
   lambda_anchor: 1.0
   lambda_safety: 1.0
   min_real_token_frac: 0.25
+  weight_decay: 0.0             # applied to B only, if set
   neighbour_replay: false
 
 write:
@@ -103,6 +105,7 @@ compact:
   pack_centroid_cos: 0.8        # similarity of source-text centroids, not of weights
   cofire_min: 0.3
   max_merged_blocks: 4
+  max_crosstalk_kl: 0.02        # merged slab vs its two parents, on each parent's probes and on anchor text
   archive_days: 90
   archive_access_ema: 0.001
   keep_originals_cycles: 1
@@ -150,6 +153,7 @@ Profile differences:
 | `base.model_id` | Qwen2.5-0.5B-Instruct | Qwen2.5-14B-Instruct | 14B or 32B |
 | `base.device` / `dtype` | cpu / float32 | cuda / bfloat16 | cuda / bfloat16 |
 | `base.quantization` | none | 4bit | none (14B) or 4bit (32B) |
+| `base.context_tokens` | 32768 | 16384 until T5.1 measures memory (`P04` §11) | 32768 |
 | `slabs.slots` | 16 | 64 | 64 |
 | `teacher.consistency_f1` | 0.0 (off) | 0.6 | 0.6 |
 | `runtime.worker_mode` | thread | thread, or process with a second GPU | same |
@@ -189,6 +193,7 @@ Every key of §1 appears here once, under its own section.
 | `gate` | Gate implementation. | P02 | P1 (E-GATE) |
 | `input_norm` | Standardise module inputs with fixed base statistics before slabs and gates. | P02 | P1 (E-GATE) |
 | `max_cap_binding` | Largest acceptable cap-binding rate in E-GATE; above it the selection strategy is revisited (D-34). | P02, P12 | P1 (E-GATE) |
+| `m_ref_std_floor` | Floor on the own-domain margin standard deviation used to rank slabs under the cap (P02 §4.2). | P02 | P1 (E-GATE) |
 | `gate_deflate_rank` | Number of top principal directions of the standardised input excluded from slabs and gates. 0 = off. | P02 | P1 (E-GATE) |
 
 ### `teacher`
@@ -210,6 +215,7 @@ Every key of §1 appears here once, under its own section.
 | `lr_slab`, `epochs`, `batch_tokens`, `max_seq_tokens`, `max_grad_norm` | L2 optimisation settings. | P03 |
 | `lambda_raw`, `lambda_replay`, `lambda_anchor`, `lambda_safety` | Loss weights. | P03, P10 |
 | `min_real_token_frac` | Minimum share of real (entry) tokens per batch. | P03 |
+| `weight_decay` | AdamW weight decay, applied to `B` only. 0 by default: sealed slabs are never stepped, and decay on an open slab would erode earlier entries between replays. | P03 |
 | `neighbour_replay` | Replay other slabs' samples. Off by default; see D-24. | P03, P08 |
 
 ### `write` (L1)
@@ -246,6 +252,7 @@ Every key of §1 appears here once, under its own section.
 | `compact.prune_energy` | Energy kept when pruning; defines `r_eff`. | P07 |
 | `compact.pack_centroid_cos`, `cofire_min` | Candidate criteria for packing and merging. `pack_centroid_cos` compares source-text centroids, never weights. | P07 |
 | `compact.max_merged_blocks` | Largest concatenated slab, in rank-`r` blocks. | P07 |
+| `compact.max_crosstalk_kl` | Largest mean KL between the model with two parent slabs and with their merged slab (D-45). | P07 |
 | `compact.archive_days`, `archive_access_ema` | Archive rule. | P07 |
 | `compact.keep_originals_cycles` | Compaction cycles for which pre-merge slab files are kept. | P07 |
 | `forget.contradiction_margin` | Logit margin required to auto-supersede. | P08 |

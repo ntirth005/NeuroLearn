@@ -14,13 +14,26 @@
 Weekly, within each namespace, on sealed slabs only:
 
 1. **Prune** unused rank inside each slab.
-2. **Pack** pairs of related slabs whose pruned ranks fit into one slab (no loss of content).
-3. **Concatenate** related pairs that do not fit into one multi-block slab under one gate (no
-   loss of content), and, only when memory limits require it, **rebuild-merge** them by
+2. **Pack** pairs of related slabs whose pruned ranks fit into one slab (the summed weights are
+   preserved exactly; the gating is not, see below).
+3. **Concatenate** related pairs that do not fit into one multi-block slab under one gate
+   (weights preserved exactly; gating changed), and, only when memory limits require it, **rebuild-merge** them by
    retraining one slab from both sets of ledger sources, accepted only if probes hold.
 4. **Archive** slabs that have not been used.
 
 Every step is verified against probes and is reversible until the next compaction.
+
+### Weight-exact is not behaviour-exact (D-45)
+
+Before a merge, two slabs act through two gates:
+`y = ŵ_a(x)·ΔW_a z + ŵ_b(x)·ΔW_b z`. After it, one gate applies the sum:
+`y = ŵ_ab(x)·(ΔW_a + ΔW_b) z`. These are different functions of `x` even when the merged weights
+equal the sum to machine precision. On a token where only slab `a` used to be open, slab `b`'s
+update is now applied as well. A co-fire rate of `compact.cofire_min = 0.3` still leaves most
+turns on which only one of the pair fired. Its size on such a token is `‖B_b A_b z‖`, small when
+`z` has little energy in `b`'s row space, but not zero. Pack and concatenate are therefore
+**lossy in activation space** and are accepted only on measurement: the retention test and the
+cross-talk check of §5 step 4. Nothing in this spec calls a merge lossless.
 
 ### Why not weight cosine, DARE or TIES
 
@@ -54,8 +67,9 @@ For each sealed slab not yet pruned:
 
 1. Compute `r_eff` and the pruned slab (P02 §7.2) with `compact.prune_energy`.
 2. If `r_eff = rank`, record it and continue.
-3. Otherwise run the retention test (P06 §5 test 2, on the slab's own probes) and anchor KL with
-   the pruned version as shadow. On pass: commit, store `r_eff`, log `prune`. On fail: keep the
+3. Otherwise re-measure `m_ref` (the row space shrank, so the gate's energy share changed) and
+   run the retention test (P06 §5 test 2, on the slab's own probes), anchor KL and the
+   cross-talk check of §5 step 4 against the unpruned slab, with the pruned version as shadow. On pass: commit, store `r_eff`, log `prune`. On fail: keep the
    original and store `r_eff = rank`.
 
 ---
@@ -76,7 +90,7 @@ takes part in at most one merge per compaction.
 
 ---
 
-## 5. Pack (exact)
+## 5. Pack (weight-exact)
 
 For a candidate pair with `r_eff(a) + r_eff(b) ≤ slabs.rank`:
 
@@ -92,23 +106,30 @@ For a candidate pair with `r_eff(a) + r_eff(b) ≤ slabs.rank`:
    slab and recompute its routing centroids (P06 §3).
 4. **Test** with the new slab as shadow and both parents excluded: retention over the union of
    both parents' probes (against their carried-over `score_at_commit`), anchor KL, gate leak,
-   the safety measures (P10 §4).
-5. On pass: mark the new slab pending. When its commit is applied at the safe point, in one
-   transaction: copy both parents' files to `slabs/_originals/<event_id>/`, unload the parents
-   and mark them `retired`, insert the new slab's sources, carry over the parents'
-   `probe_scores` (with the original `score_at_commit`), log `pack`. Until then the parents keep
-   serving. On fail: discard; the pair stays as it was.
+   the safety measures (P10 §4), and **cross-talk**: on the prompts of each parent's probes and
+   on anchor `eval` text, the mean per-token `KL(p_parents ‖ p_merged)`, where `p_parents` is the
+   model with both parents live and `p_merged` the model with the merged slab instead, must be
+   ≤ `compact.max_crosstalk_kl`. It is reported per parent, so a merge that is fine for one
+   domain and leaks into the other is visible.
+5. On pass: mark the new slab pending. When its commit is applied at the safe point: first,
+   outside any transaction, copy both parents' files to `slabs/_originals/<event_id>/`; then, in
+   one short metadata-only transaction, mark the parents `retired`, insert the new slab's
+   sources, carry over the parents' `probe_scores` (with the original `score_at_commit`) and
+   log `pack`; then unload the parents. No file is read or written while the write lock is held
+   (P01 §4.6). A crash between the copy and the transaction leaves an unreferenced
+   `_originals` directory, which start-up deletes. Until the commit the parents keep serving.
+   On fail: discard; the pair stays as it was.
 
 ---
 
 ## 6. Concatenate, then rebuild-merge
 
-### 6.1 Concatenate (exact, variable rank; D-26)
+### 6.1 Concatenate (weight-exact, variable rank; D-26)
 
 For a candidate pair that does not fit in rank `r`: join the two slabs into **one logical slab of
 rank `r_eff(a) + r_eff(b)`** rounded up to whole blocks, occupying several slots under one gate
 (slot groups, P02 §5.3), up to `compact.max_merged_blocks` blocks. No truncation happens, so
-content is preserved exactly. Re-fit `φ`, test and retire the parents exactly as in §5 steps 2–5;
+the summed weights are preserved exactly; the gating is not (§1), and the same cross-talk check applies. Re-fit `φ`, test and retire the parents exactly as in §5 steps 2–5;
 log `pack` with `mode: "concat"`.
 
 Concatenation does not reduce parameters. It reduces the number of routing and gating units
@@ -173,7 +194,7 @@ In detail:
   compute. Neither depends on how many slabs exist on disk.
 - **Reduced by compaction:** the number of routing units, through packing and concatenation.
 - **Not bounded:** total parameters on disk. They grow roughly in proportion to the novel
-  information stored; only pruning and successful rebuild-merges reduce them. Lossless packing
+  information stored; only pruning and successful rebuild-merges reduce them. Weight-exact packing
   fires only when pruning finds unused rank, which may be rare. This is expected, not a defect:
   cold slabs are archived and paged in by routing.
 
@@ -190,7 +211,9 @@ In detail:
 | I-P07-5 | Revert restores the parents bit for bit. | tiny |
 | I-P07-6 | No pair from different namespaces is ever a candidate. | unit |
 | I-P07-7 | An archived slab selected by routing is paged in and produces the same output as before archiving. | tiny |
-| I-P07-8 | A concatenated slab's update equals the sum of its parents' updates exactly, and never exceeds `compact.max_merged_blocks` blocks. | unit |
+| I-P07-8 | With every gate forced fully open, a concatenated slab's update equals the sum of its parents' updates exactly; it never exceeds `compact.max_merged_blocks` blocks. | unit |
+| I-P07-9 | A pair built so that one parent's update is large on the other's domain passes the weight check (`kept ≥ 0.999`) and fails the cross-talk check; the merge is discarded and the parents are unchanged. | tiny |
+| I-P07-10 | No compaction step copies, writes or deletes a file while a ledger write transaction is open. | tiny |
 
 **Gate for P4 (slow, P11 stream):** over 200 cycles, hot and warm memory stay within their
 configured limits and the number of non-archived routing units per namespace stops growing once

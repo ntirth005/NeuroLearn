@@ -36,11 +36,13 @@ Generated from a seed. Everything is fictitious so the base cannot know it.
 | Style rules (10) | e.g. "sign off with '— N.'", "answer in at most two sentences" |
 
 Sizes are chosen so that every category has enough independent clusters for §5.1 (a `multi`
-question is tied to one project, a `style` question to one rule), and enough facts for 200 cycles.
+question belongs to the project whose attribute is its answer, a `style` question to one rule),
+and enough facts for 200 cycles. Every object has a stable `object_id`.
 
 A **fact** is one attribute of one object, with a stable `fact_id`, three statement paraphrases,
 three question paraphrases, a gold short answer, and a category. Every evaluation question
-records the `fact_id`s it depends on (one for most, two for `multi`); §5 uses them to cluster. Question paraphrase 1 is reserved for
+records the `fact_id`s it depends on (one for most, two for `multi`) and the `object_id` of the
+object its **answer** is an attribute of; §5 clusters on that object. Question paraphrase 1 is reserved for
 evaluation and is never shown to the system in any form; paraphrases 2–3 feed the oracle teacher.
 
 Categories: `fact` (exact values), `jargon`, `multi` (two-hop: "Which port does the project owned
@@ -133,18 +135,35 @@ Questions are not independent observations. The same fact is asked at several la
 off and on, and again inside two-hop questions; facts about one object arrive in one session.
 Resampling questions one by one would give intervals that are too narrow.
 
-- **Cluster.** Two questions are in the same cluster if they share a `fact_id`, directly or
-  through a chain of shared facts (so a `multi` question joins the clusters of both its facts).
-  Clusters are computed once per stream from `truth.json`.
+- **Cluster (D-49).** A question's cluster is the object its answer belongs to (`object_id`):
+  all questions about one person, one project, one jargon term or one style rule, at every lag
+  and in both recall conditions, form one cluster. There is **no transitive chaining**: a
+  two-hop question is in the cluster of its answer's object only. Chaining through shared
+  facts would let bridging questions join clusters into one large component (a person who owns
+  several projects links all of them), and a bootstrap over a few huge clusters says little.
+  The price is a residual correlation between two-hop questions that pass through the same
+  intermediate object; it is accepted and stated. Clusters are computed once per stream from
+  `truth.json`, and the share of questions in the largest cluster is reported (I-P11-8).
 - **Paired cluster bootstrap.** For a comparison between two systems on one seed: resample
   clusters with replacement (10,000 draws), take every question of each drawn cluster for both
   systems, and compute the difference. Report its 95% interval.
 - **Seeds.** Run 3 seeds. Report the interval **for each seed separately** and the number of
   clusters behind it. Three seeds are too few to resample; they are a replication check, not a
   sample.
-- **"Above baseline"** in any gate means: the interval excludes zero on every seed.
-  **"Not worse"** means: on no seed does the interval lie wholly below zero. A gate that holds
-  on some seeds only is reported as mixed and does not pass.
+- **"Above baseline"** in any gate means: the interval excludes zero on every seed. A gate that
+  holds on some seeds only is reported as mixed and does not pass.
+- **"Not worse", for one comparison:** the one-sided test "the difference is below zero" is not
+  significant at 5%.
+- **"Not worse on any category" (a guard over several categories, D-49).** Checking every
+  category on every seed separately would be many tests: 7 categories × 3 seeds at 2.5% each
+  give a 41% chance of at least one false failure when nothing is wrong. The guard is therefore
+  one family of tests: for each guarded category take the difference averaged over seeds
+  (resampling clusters within each seed, 100,000 draws), compute the one-sided bootstrap
+  p-value that it is below zero, and apply the Holm step-down correction across the categories
+  at a family-wise level of 5%. The guard fails only if some category is rejected after
+  correction. Holm is used instead of a false-discovery-rate procedure because a single
+  rejection fails the guard, so the error to control is "any false failure". Per-seed,
+  uncorrected intervals are still reported for every category, marked as descriptive.
 - Report the cluster count next to every interval. A category with fewer than 10 clusters in a
   run is reported without a pass/fail and is left out of any "not worse on any category" guard,
   with a note saying so.
@@ -186,7 +205,8 @@ One rule, fixed before any run (D-41):
 - **Threshold:** the paired clustered-bootstrap 95% interval of `full − a` on that metric
   excludes zero on every seed (§5.1; the metric is recomputed on each bootstrap draw).
 - **Guard:** `full` is not worse than `a` on any single category among `fact`, `jargon`,
-  `multi`, `style`, `updated`, `tool` and the anchor questions. `forgotten` is not part of the
+  `multi`, `style`, `updated`, `tool` and the anchor questions, by the Holm-corrected guard
+  procedure of §5.1. `forgotten` is not part of the
   guard; it is judged by G-10.
 - **Secondary, reported, not deciding:** the same difference per category. It sets the status of
   C-8 per category in `06`.
@@ -270,5 +290,7 @@ table then lists, and T0.8 is repeated on the GPU profile at T5.1.
 | I-P11-3 | `Engine.answer` leaves the ledger, slabs and sessions unchanged. | tiny |
 | I-P11-4 | The bare base scores at chance on `fact` questions with recall off (the world is unknown to it). | slow |
 | I-P11-5 | All systems receive identical streams and identical evaluation questions. | unit |
-| I-P11-6 | Every evaluation question carries its `fact_id`s; cluster assignment is a deterministic function of `truth.json`; a `multi` question is in the same cluster as both of its facts. | unit |
+| I-P11-6 | Every evaluation question carries its `fact_id`s and its answer's `object_id`; cluster assignment is a deterministic function of `truth.json`; a `multi` question is in exactly one cluster, that of its answer's object. | unit |
+| I-P11-8 | In every generated stream the largest cluster holds at most 10% of the questions of its category, and the figure is written to the report. | unit |
+| I-P11-9 | On synthetic results with no true difference in any of 7 categories, the guard fails in at most 5% of 2,000 simulated runs; the uncorrected per-seed rule fails in far more, and both rates are reported by the test. | unit |
 | I-P11-7 | On a synthetic result set with perfectly correlated duplicates of each question, the cluster bootstrap interval has the same width as without the duplicates, and the per-question bootstrap is narrower. | unit |

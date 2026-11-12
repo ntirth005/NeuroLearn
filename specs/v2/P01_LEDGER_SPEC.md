@@ -26,7 +26,7 @@ operations they call are defined here).
 ```
 <paths.data_dir>/
   ledger.sqlite                    # WAL mode; ledger.sqlite-wal and -shm beside it hold content too (§4.7)
-  slabs/<namespace>/<slab_id>.safetensors
+  slabs/<namespace>/<slab_id>.v<version>.safetensors
   slabs/_originals/<event_id>/     # pre-compaction copies (P07)
   stats/<stats_id>.safetensors     # per-module input mean and std of the base (P02 §2.1)
   anchor/anchor.jsonl              # anchor text (P03)
@@ -251,6 +251,16 @@ re-embed every chunk and recompute every slab centroid.
 
 Each thread opens its own connection with `PRAGMA busy_timeout = ledger.busy_timeout_ms`.
 
+- **Every write transaction starts with `BEGIN IMMEDIATE`** on a connection opened with
+  `isolation_level=None` (D-47). A transaction that starts by reading and writes later is
+  refused at once if another connection committed in between; the busy timeout does not apply.
+  Measured: `database is locked` after 0 ms with a 5,000 ms timeout, where the same sequence
+  under `BEGIN IMMEDIATE` waited 435 ms and succeeded (`reference/sqlite_txn_upgrade.py`,
+  `05` §3.6). `append` (duplicate check, then insert) and `bump_access` (read the average, then
+  update) are both of that shape. Reads outside a transaction stay in autocommit.
+- **No file is copied, written, renamed or deleted inside a write transaction.** Slab files and
+  `_originals` copies are placed first; the transaction changes metadata only; clean-up follows.
+
 - **Readers are not blocked by a writer in WAL mode, including on the FTS5 table.** Measured on
   this machine (SQLite 3.45.1): 1,438 FTS queries completed with no error and a 14 ms maximum
   while another connection held a 20,000-row FTS write transaction (`05` §3.4).
@@ -339,6 +349,7 @@ class Ledger:
 | I-P01-11 | After `wipe` and a successful `erase_residue`, no file of the ledger (`.sqlite`, `-wal`, `-shm`) contains any canary of the entry, including when the entry was checkpointed before the wipe and when a reader held a snapshot during the first checkpoint attempt. Ported from `reference/sqlite_forget_residue.py`. | unit |
 | I-P01-12 | Every connection reports `secure_delete = 1`, and the FTS5 `secure-delete` option is on. | unit |
 | I-P01-13 | `link(..., role='primary')` raises if the entry already has a primary row in a non-retired level ≥ 2 slab; `unconsolidated` returns an entry whose only primary row is in a retired slab. | unit |
+| I-P01-15 | Every ledger write runs inside a transaction opened with `BEGIN IMMEDIATE`; a test hook fails on any write statement outside one and on any file operation while one is open. Two threads doing read-then-write `append` calls for 1,000 turns raise no lock error. Ported from `reference/sqlite_txn_upgrade.py`. | unit |
 | I-P01-14 | No `events.payload` contains the text of any entry or derived row (checked over a full test run). | unit |
 
 Gate for T0.4: on the P11 synthetic stream, recall@6 of the gold source chunk for fact questions

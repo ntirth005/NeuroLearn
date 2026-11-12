@@ -20,6 +20,7 @@ Status values: `unproven` (no run), `supported` (gate passed on the synthetic st
 |---|---|
 | Slab algebra (canonical form, stacked forward, pack, prune) is correct | `reference/verify_slab_math.py`; `05` §3.1 |
 | Slab sizes and overhead estimates follow from real model dimensions | fetched Qwen 2.5 configs; `05` §3.2 |
+| The gate ramp has bounded gradients (a kink at the cut, no pole); QR needs a sign fix to give `R ≈ I`; a read-then-write SQLite transaction fails at once without `BEGIN IMMEDIATE` | `reference/verify_gate_and_retraction.py`, `reference/sqlite_txn_upgrade.py`; `05` §3.6 |
 | A logical SQLite wipe leaves the text in the files; `secure_delete` + FTS5 `secure-delete` + a truncating checkpoint removes it from them | `reference/sqlite_forget_residue.py`; `05` §3.5 |
 
 ---
@@ -37,7 +38,7 @@ the sources in `05` show; a literature check is required before claiming novelty
 | C-3 | Self-generated training data drifts or collapses | Frozen base is the only teacher, reading real entries; depth-1 rule | Design rule; not found in SEAL-style work | G-6 over 200 cycles; B-3 | unproven |
 | C-4 | Unlearning damages utility or does not really forget | Ledger provenance + rebuild; base is the "unknown" state. Three separate guarantees: source removal and provenance removal by construction, behavioural removal measured (`P08` §3) | Retraining-based forgetting at slab granularity with provenance; not claimed to be exact unlearning | G-10; B-4 | unproven |
 | C-5 | Weight updates invalidate serving caches | Shadow slabs, commits at safe points | Engineering | G-5; E-STALE | unproven |
-| C-6 | Memory and routing cost grow without bound as adapters accumulate | Fixed hot slots and warm set; archive with paging; lossless packing and concatenation reduce routing units. Disk use still grows with stored information; that is not claimed to be bounded | Packing by effective rank and lineage instead of weight cosine | G-9; E-COS | unproven |
+| C-6 | Memory and routing cost grow without bound as adapters accumulate | Fixed hot slots and warm set; archive with paging; weight-exact packing and concatenation, each accepted on a cross-talk check, reduce routing units. Disk use still grows with stored information; that is not claimed to be bounded | Packing by effective rank and lineage instead of weight cosine | G-9; E-COS | unproven |
 | C-7 | Continual updates erode refusal behaviour | KL-to-base term + three-measure gate on every commit (refusal preservation, benign preservation, leakage) + human audit at phase exit. The claim is agreement with the base on a probe set, not a safety rate | Combination | G-8 | unproven |
 | C-8 | Parametric memory loses detail; retrieval lacks integration | Both: recall for exact strings, slabs for vocabulary, style, multi-entry knowledge | Combination (PRAG-style work points the same way) | G-K; B-5 | unproven |
 | C-9 | Method tied to one base model | Module-map adapter per family; base swap by ledger replay | Engineering | B-6 | unproven |
@@ -78,6 +79,8 @@ rules in `04_BUILD_PLAN.md` §1.
   prompt can recover the fact (`P08` §3.3).
 - Safety figures measure agreement with the base on a probe set. They inherit the base's own
   behaviour and say nothing about prompts outside the set (`P10` §1).
+- Packing and concatenation preserve the summed weights, not the behaviour: one gate replaces
+  two. Each merge is accepted on a measured cross-talk check, not on the algebra (`P07` §1).
 - When more than `slabs.top_k` slabs are open on a token, which of them are applied depends on
   the other loaded slabs (`P02` §4.2). The rate is measured, not zero.
 - A weak base is a weak teacher; quality of derived samples is bounded by the base model.

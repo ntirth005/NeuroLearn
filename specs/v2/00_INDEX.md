@@ -2,7 +2,7 @@
 
 **Status:** design specification. Nothing is implemented. Update the status tables in
 `04_BUILD_PLAN.md` as work lands.
-**Date written:** 2026-11-11 · **Last revised:** 2026-11-12 (three external reviews applied; decisions D-22 to D-42)
+**Date written:** 2026-11-11 · **Last revised:** 2026-11-12 (four external reviews applied; decisions D-22 to D-50)
 **Source requirement:** PRD "Project Neurolearn v2.0 (Localized Lifelong Continual Learning Architecture)"
 
 This folder is the complete design for Neurolearn v2.0, split so that one component can be built
@@ -62,6 +62,8 @@ Rules that hold everywhere are in §6 below. Break none of them without a decisi
 | `P13_PUBLIC_BENCHMARKS_SPEC.md` | Public benchmarks against published methods; support for other model families | Phases P1, P3, P5 |
 | `reference/verify_slab_math.py` | NumPy script that checks the slab algebra; results in `05` §3.1 | Task T1.2 |
 | `reference/sqlite_wal_contention.py` | Script showing SQLite readers are not blocked by a writer but writers block each other; results in `05` §3.4 | Task T0.3 |
+| `reference/verify_gate_and_retraction.py` | NumPy checks of the gate ramp's gradients, QR sign and retraction, decay, and guard error rates; results in `05` §3.6 | Tasks T1.3, T0.7 |
+| `reference/sqlite_txn_upgrade.py` | Script showing a read-then-write transaction fails at once without `BEGIN IMMEDIATE`; results in `05` §3.6 | Task T0.3 |
 | `reference/sqlite_forget_residue.py` | Script showing what a logical wipe leaves in the SQLite files and which settings remove it; results in `05` §3.5 | Tasks T0.3, T4.5 |
 
 ---

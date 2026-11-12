@@ -109,6 +109,34 @@ after each. "Files" lists where a canary was still found.
 - Not covered: the storage medium below the file system, and long values split across overflow
   pages (the canaries were short on purpose). Basis for D-38.
 
+### 3.6 Fourth-review checks (2026-11-12)
+
+`reference/verify_gate_and_retraction.py` (NumPy, `d_in = 5120`, `r = 8`, `τ = 0.5`, `δ = 0.1`,
+`φ = −1.1`):
+
+| Check | Result |
+|---|---|
+| Gate slope at the cut, in `e` units | 1,153.6, equal to the review's closed form |
+| Same slope in log-lift units, `dw/dg` | 0.200 (`δ/τ`) |
+| `dw/dφ` at the cut | −0.200 |
+| `\|dw/dA\|` per token: at the cut / at chance level / maximum over the open range | 30.4 / 10.1 / 51.9 |
+| QR after a small step, canonical `A` made by QR, 200 trials | 0 with a negative diagonal in `R` |
+| Same, canonical `A` made by an SVD (as after prune or pack) | 200 of 200 with a negative diagonal; `\|R − I\|` up to 2.0 |
+| `\|R − I\|` after a step of relative size `1e-2`: full step / row-space part removed | 6.0e-4 / 5.0e-5 |
+| Decay of `A` and `B` by 0.99, then retraction | `A` rows back to norm 1; `B` scaled by 0.9801 |
+| Chance of a false failure: 21 checks at 2.5% / 7 checks | 0.412 / 0.162 |
+| KV cache, Qwen2.5-14B, bf16, 32,768 / 16,384 tokens | 6.00 GiB / 3.00 GiB |
+
+The large slope in `e` units is a matter of units: `e` is about `1.7e-4` at the cut. The gate has
+a kink there, like a ReLU; no gradient is unbounded.
+
+`reference/sqlite_txn_upgrade.py` (SQLite 3.45.1, WAL, busy timeout 5,000 ms):
+
+| Check | Result |
+|---|---|
+| Deferred transaction reads, another connection commits, the first then writes | `database is locked` after 0 ms |
+| Same sequence under `BEGIN IMMEDIATE` while a writer holds the lock for 0.5 s | succeeded after 435 ms |
+
 ---
 
 ## 4. What is not verified
@@ -144,3 +172,10 @@ Roughly in order of risk to the design:
 16. **Module layouts of other families**, DeepSeek in particular (`P13` §2.2), are from memory;
     list module names before planning around a model.
 17. **Media-level erasure** is not tested and not claimed (§3.5, D-38).
+18. **GPU-profile hazards** listed in `P04` §11 (allocator fragmentation, per-token launch
+    overhead, memory at 32k context on 24 GB). Only the KV-cache arithmetic was checked. The
+    remedies the fourth review names, including specific PyTorch allocator calls and launch-cost
+    figures, were not checked against any installation and must be confirmed at T5.1.
+19. **Whether dead gates occur in practice** and whether a slower `φ` schedule is needed (E-GATE
+    reports resets). **Cross-talk after packing** on trained slabs (I-P07-9, T4.2).
+20. **Rank allocation on grouped-query models** (E-MLP arms).

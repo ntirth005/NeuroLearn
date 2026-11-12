@@ -21,8 +21,8 @@ its status and write the measured result (or the report path) in the last column
 | In progress / half-done | nothing |
 | Blockers | Repo `.venv` cannot import `torch` (`_ctypes` missing); T0.1 fixes this. No GPU on this machine: full-size benchmark runs (T3.7 full, P5) need other hardware. |
 | Waiting on the owner | (1) Confirm D-41: kill criterion G-K is decided by one primary metric, the mean of recall-on accuracy on `jargon`/`style`/`multi`, with no single category worse. Needed before T3.6. (2) Refusal probe prompts for T3.3, now with paraphrase and adversarial variants and hand labels for the `eval` split (`P10` §2), and time for the human audit at the P3 exit (`P10` §4.1). (3) `eval.run_budget_hours` (48 until set), used by G-0. (4) Whether `milestone-3` is also out of scope (currently treated as yes). |
-| Repo state | `specs/v2/`, `AGENTS.md`, `CLAUDE.md` are committed on `master` (not pushed as of 2026-11-11). The third-review and finalisation edits of 2026-11-12 are committed on `master` as well (not pushed). No code exists. |
-| Design changes since first draft | Two external reviews applied 2026-11-11: decisions D-22 to D-33 in `01`. Third review applied 2026-11-12: D-34 to D-42. Read them before P1; D-36 and D-38 change the ledger built in T0.3. |
+| Repo state | `specs/v2/`, `AGENTS.md`, `CLAUDE.md` are committed on `master` (not pushed as of 2026-11-11). All spec work through the fourth review (2026-11-12) is committed on `master` and pushed to GitHub and GitLab. `architecture_chat.txt` at the repo root is an untracked transcript, left out on purpose. No code exists. |
+| Design changes since first draft | Two external reviews applied 2026-11-11: decisions D-22 to D-33 in `01`. Third and fourth reviews applied 2026-11-12: D-34 to D-50. Read them before P1; D-36, D-38 and D-47 change the ledger built in T0.3, D-46 changes the engine built in T0.5 and T2.1. |
 
 ---
 
@@ -49,11 +49,11 @@ baseline numbers.
 |---|---|---|---|---|---|
 | T0.1 | Rebuild the Python environment. The current `.venv` fails on `import torch` (`No module named '_ctypes'`). Create a 3.12 environment where `python -c "import ctypes, sqlite3, torch"` works; install CPU PyTorch, `transformers`, `safetensors`, `numpy`, `pytest`, `pyyaml`, and the sentence-encoder dependency. Add `pyproject.toml`; git-ignore `data/` and `.venv/`. | `02` §4 | The import check passes; `pytest` collects. | todo | |
 | T0.2 | Package skeleton per `02` §3; `config.py` loading `configs/dev.yaml` into typed dataclasses; `cli.py` stub. | `02`, `03` | Config round-trips; unknown keys raise. | todo | |
-| T0.3 | Ledger schema, `store.py`, `chunker.py`, event log, batched writes, busy timeout, `secure_delete` settings, `wipe`, `erase_residue`, ownership rule. Port `reference/sqlite_wal_contention.py` and `reference/sqlite_forget_residue.py` into tests. | `P01` §2–4 | I-P01-1…6, I-P01-8, I-P01-10…14 pass. | todo | |
+| T0.3 | Ledger schema, `store.py`, `chunker.py`, event log, batched writes, busy timeout, `secure_delete` settings, `wipe`, `erase_residue`, ownership rule. `BEGIN IMMEDIATE` on every write. Port `reference/sqlite_wal_contention.py`, `sqlite_forget_residue.py` and `sqlite_txn_upgrade.py` into tests. | `P01` §2–4 | I-P01-1…6, I-P01-8, I-P01-10…15 pass. | todo | |
 | T0.4 | `embed.py` (confirm the encoder model is obtainable; record the choice), `recall.py`. | `P01` §4.3–4.4 | I-P01-5, I-P01-7, I-P01-9 pass. | todo | |
-| T0.5 | Base loader; `tiny` fixture model; minimal engine: sessions, prompt layout, KV-cached decode loop, `chat`, `answer`, no slabs, no worker. Build `anchor/anchor.jsonl` with `train`/`eval` splits (tool category can wait for T4.8). | `P04` §2–3, `02` §5 | I-P04-5, I-P04-6, I-P04-8, I-P11-3 pass on `tiny`. | todo | |
-| T0.6 | Synthetic user generator and ground-truth table, with `fact_id`s and twice-stated forget targets. | `P11` §2 | I-P11-1, I-P11-2, I-P11-6 pass. | todo | |
-| T0.7 | Metrics, clustered bootstrap, report writer, baselines `a` and `b`, `eval.run`. | `P11` §4–7 | I-P11-5, I-P11-7 pass; gate G-1. | todo | |
+| T0.5 | Base loader; `tiny` fixture model; minimal engine: sessions, prompt layout, KV-cached decode loop, `chat`, `answer`, no slabs, no worker. Build `anchor/anchor.jsonl` with `train`/`eval` splits (tool category can wait for T4.8). | `P04` §2–3, `02` §5 | I-P04-5, I-P04-6, I-P04-8, I-P04-13, I-P11-3 pass on `tiny`. | todo | |
+| T0.6 | Synthetic user generator and ground-truth table, with `fact_id`s and twice-stated forget targets. | `P11` §2 | I-P11-1, I-P11-2, I-P11-6, I-P11-8 pass. | todo | |
+| T0.7 | Metrics, clustered bootstrap, report writer, baselines `a` and `b`, `eval.run`. | `P11` §4–7 | I-P11-5, I-P11-7, I-P11-9 pass; gate G-1. | todo | |
 | T0.8 | Feasibility measurement on `dev`: throughput, step time with a stand-in adapter, peak memory, disk per entry; projected wall time of every required run. | `P11` §8.1 | `reports/feasibility_dev.md` written; gate G-0; a decision record for every run projected over budget. | todo | |
 
 **Exit gate P0:** G-1 — baselines `a` and `b` complete a 10-cycle run on the 0.5B base and write
@@ -71,11 +71,11 @@ Goal: a slab can be attached, trained and gated on a real model; the gate questi
 |---|---|---|---|---|---|
 | T1.1 | `slab.py`, `canonicalise`, `io.py`. | `P02` §2, §3, §8 | I-P02-2, I-P02-8 pass. | todo | |
 | T1.2 | `algebra.py`: cosine, effective rank, prune, pack. Port `specs/v2/reference/verify_slab_math.py` into unit tests. | `P02` §7 | I-P02-7 passes; the reference numbers reproduce. | todo | |
-| T1.3 | `gate.py`: `rowspace`, `keyed`, `competitive`; ramp, calibrated cap, `retract` with momentum transform. | `P02` §4 | I-P02-4, I-P02-5, I-P02-6, I-P02-13, I-P02-14, I-P02-16, I-P02-17 pass. | todo | |
-| T1.4 | Input statistics builder (`stats/<stats_id>.safetensors` from the anchor `train` split); `slab_linear.py`, `context.py`, `install_slabs`, slot groups. | `P02` §2.1, §5 | I-P02-1, I-P02-3, I-P02-9, I-P02-10, I-P02-11 pass; I-P02-12 measured. | todo | |
+| T1.3 | `gate.py`: `rowspace`, `keyed`, `competitive`; ramp, calibrated cap, `retract` with momentum transform. | `P02` §4 | I-P02-4, I-P02-5, I-P02-6, I-P02-13, I-P02-14, I-P02-16, I-P02-17, I-P02-19, I-P02-23 pass. | todo | |
+| T1.4 | Input statistics builder (`stats/<stats_id>.safetensors` from the anchor `train` split); `slab_linear.py`, `context.py`, `install_slabs`, slot groups. | `P02` §2.1, §5 | I-P02-1, I-P02-3, I-P02-9, I-P02-10, I-P02-11, I-P02-20, I-P02-22 pass; I-P02-12 measured. | todo | |
 | T1.5 | `hotset.py` (load, unload, commit, gate mass). | `P02` §6 | Slot round-trip test passes on `tiny`. | todo | |
 | T1.6 | `probes.py`, `batches.py`, `anchor.py`, loss terms; oracle teacher path. | `P03` §5–6 | I-P03-3, I-P03-4 pass. | todo | |
-| T1.7 | `train_slab`. | `P03` §7 | I-P03-5…7, I-P03-9, I-P03-11, I-P03-12, I-P02-15, I-P02-18 pass; I-P03-10 measured; gate G-2 measured on the 0.5B base; step time measured and the T0.8 projection corrected. | todo | |
+| T1.7 | `train_slab`. | `P03` §7 | I-P03-5…7, I-P03-9, I-P03-11, I-P03-12, I-P02-15, I-P02-18, I-P02-21 pass; I-P03-10 measured; gate G-2 measured on the 0.5B base; step time measured and the T0.8 projection corrected. | todo | |
 | T1.8 | Experiment E-GATE, including the overload condition. Record the outcome as updates to D-04 and D-34. | `P12` §2 | Result line filled; `slabs.gate` set; cap decision recorded. | todo | |
 | T1.9 | Family map; substrate test on two further model families. | `P13` §2 | I-P13-1, I-P13-2 pass; G-2, G-3 measured per family. | todo | |
 
@@ -90,10 +90,10 @@ Goal: the system serves turns while a worker trains; a fact survives across sess
 
 | ID | Task | Spec | Done when | Status | Result |
 |---|---|---|---|---|---|
-| T2.1 | Engine with slabs: routing with pinned slabs only, gate statistics, `bump_access`. | `P04` §3, §5 | I-P04-1, I-P04-9 pass. | todo | |
+| T2.1 | Engine with slabs: routing with pinned slabs only, gate statistics, `bump_access`. | `P04` §3, §5 | I-P04-1, I-P04-9, I-P04-11, I-P04-12 pass. | todo | |
 | T2.2 | Surprise statistics; job hand-off to the worker. | `P04` §4 | Unit tests on the z-score and warm-up. | todo | |
 | T2.3 | Worker thread, `should_yield`, shadow → pending → commit at safe points, idle re-prefill. | `P04` §6–7 | I-P04-2, I-P04-3, I-P04-4, I-P04-10 pass. | todo | |
-| T2.4 | Crash recovery and failure handling. | `P04` §9 | I-P04-7 passes. | todo | |
+| T2.4 | Crash recovery and failure handling, including a kill at each point of a commit. | `P04` §6.1, §9 | I-P04-7, I-P04-14 pass. | todo | |
 | T2.5 | Model teacher: `derive`, filters, probe selection. | `P03` §3–4 | I-P03-1, I-P03-2, I-P03-8 pass; acceptance rate of drafts on the 0.5B base reported. | todo | |
 | T2.6 | L1 write pipeline. | `P05` | I-P05-1…7 pass; gate G-4 measured. | todo | |
 | T2.7 | Experiments E-L1 and E-STALE. Record decisions (D-02, D-06). | `P12` §2 | Result lines filled; config updated. | todo | |
@@ -130,11 +130,11 @@ Goal: bounded growth, forgetting, updates, tools.
 | ID | Task | Spec | Done when | Status | Result |
 |---|---|---|---|---|---|
 | T4.1 | Prune. | `P07` §3 | I-P07-1 passes. | todo | |
-| T4.2 | Candidate pairs, pack, gate re-fit. Experiment E-COS. | `P07` §4–5 | I-P07-2, I-P07-3, I-P07-6 pass; E-COS result filled. | todo | |
+| T4.2 | Candidate pairs, pack, gate re-fit. Experiment E-COS. | `P07` §4–5 | I-P07-2, I-P07-3, I-P07-6, I-P07-9, I-P07-10 pass; E-COS result filled; cross-talk measured. | todo | |
 | T4.3 | Concatenate, rebuild-merge, originals, revert. | `P07` §6–7 | I-P07-4, I-P07-5, I-P07-8 pass. | todo | |
 | T4.4 | Archive and page-in. | `P07` §8 | I-P07-7 passes. | todo | |
 | T4.5 | `rebuild`, `forget` (shallow and deep): restatement search, held probes, erasure, behavioural check, interrupted-forget recovery. | `P08` §2–3, §5 | I-P08-1…4, I-P08-7…13 pass. | todo | |
-| T4.6 | Supersession detection and procedure. | `P08` §4 | I-P08-5, I-P08-6 pass; detection precision/recall on the stream reported. | todo | |
+| T4.6 | Supersession detection and procedure. | `P08` §4 | I-P08-5, I-P08-6, I-P08-14 pass; detection precision/recall on the stream reported. | todo | |
 | T4.7 | `refusal` slabs. | `P08` §6 | §6 step 4 tests measured. | todo | |
 | T4.8 | Tool registry with constraint levels, validator, grammar, post-decoding repair, trace acceptance, `exec` slabs, tool rows in the anchor file. | `P09` | I-P09-1…6 pass. | todo | |
 | T4.9 | 200-cycle run and the forget / update / tool sets. | `P11` §8 | Reports linked here. | todo | |
@@ -149,7 +149,7 @@ Goal: the same system on a GPU and a capable base, with the model teacher.
 
 | ID | Task | Spec | Done when | Status | Result |
 |---|---|---|---|---|---|
-| T5.1 | `gpu24` profile: 4-bit base wrapping, bf16 slabs, gradient checkpointing. Repeat the T0.8 feasibility measurement on this profile. | `P02` §5, `03`, `P11` §8.1 | `tiny`+`slow` suites pass on GPU; `reports/feasibility_gpu24.md` written. | todo | |
+| T5.1 | `gpu24` profile: 4-bit base wrapping, bf16 slabs, gradient checkpointing. Repeat the T0.8 feasibility measurement on this profile and work through the hazard table of `P04` §11. | `P02` §5, `03`, `P11` §8.1 | `tiny`+`slow` suites pass on GPU; `reports/feasibility_gpu24.md` written. | todo | |
 | T5.2 | Rebuild anchor and refusal files for the 14B base; 50-cycle runs, 3 seeds, `teacher.mode: model`. | `P11` §8 | Reports linked here. | todo | |
 | T5.3 | Overhead benchmark at empty and full slots. | `P11` §5 | G-13 measured. | todo | |
 | T5.4 | Experiment E-OOV; ship X-1 only if it wins. | `P12` | Result line filled. | todo | |
@@ -252,3 +252,18 @@ whoever works on the project.
   Tidied: `03` §2 regrouped by section with four missing rows added, `05` §4 renumbered, repo
   layout and file map completed, the two unrecorded ideas from 2026-11-11 listed in `P12` §4.
   Next: T0.1.
+- **2026-11-12 (fourth review)** — Spec edits only; no code. A fourth external review (20
+  items) was checked item by item, numerically where possible (`reference/
+  verify_gate_and_retraction.py`, `reference/sqlite_txn_upgrade.py`, `05` §3.6). Decisions D-43
+  to D-50. Confirmed and fixed: QR sign and retraction details, decay on `B` only (D-44);
+  packing is not behaviour-exact, cross-talk check added (D-45); several sessions sharing the
+  slot pool, where checking the review's scenario exposed that one user's private slabs could
+  act on another user's turn, now masked (D-46); `BEGIN IMMEDIATE` and no file I/O in
+  transactions, the latter a fault introduced by the previous revision (D-47); superseding
+  entry joins the rebuilt slab (D-48); bootstrap clusters by answer object and a Holm-corrected
+  guard (D-49); float32 gate path, calibration floor, 16k context on `gpu24` (D-50); recalled
+  chunk ids pruned on eviction. Checked and found wrong as stated: the gate-gradient
+  "singularity" (the formula is right, the slope is 0.2 in the units that matter), dead slabs
+  "at step 1-3" (no gradient reaches `φ` while `B = 0`), weight-decay atrophy of sealed slabs,
+  the calibrated-margin example. Dead-gate detection was still added (D-43). Not verified: the
+  GPU hazards and remedies of `P04` §11, which wait for T5.1. Next: T0.1.

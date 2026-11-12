@@ -29,7 +29,8 @@ class Session:
     id: str; user: str; started_ts: str
     token_ids: list[int]                 # everything in the context so far
     kv: Any | None                       # past_key_values matching token_ids
-    recalled_chunk_ids: set[int]
+    recalled_chunk_ids: set[int]         # chunks currently in the context
+    turn_chunk_ids: list[set[int]]       # per turn, the chunks that turn brought in
     hot_at_start: set[int]
     last_activity: float
 ```
@@ -52,7 +53,9 @@ The context is **append-only** so the KV prefix stays valid:
   next turn (this is a safe point).
 - When `len(token_ids)` would exceed `base.context_tokens`, the oldest turns are dropped (they are
   already in the ledger), the KV cache is discarded and the remaining context is re-prefilled.
-  This is a safe point.
+  This is a safe point. The chunk ids of the dropped turns are removed from
+  `recalled_chunk_ids`, so those chunks can be recalled again; otherwise a chunk that has left
+  the context could never return to it for the rest of the session.
 
 ---
 
@@ -115,6 +118,26 @@ Until T3.4 there are too few slabs to need step 2: load everything that fits.
 
 The hot set is fixed for the duration of a turn. There are no mid-decode loads.
 
+**Several live sessions (D-46).** Up to seven users may each hold a session with a KV cache,
+and all of them share one pool of `slabs.slots` slots (P02 §6). Turns are served one at a time.
+
+1. At the start of a turn the engine sets `SlabContext.active` to the slots of that session's
+   slabs plus the shared namespaces. Slabs held only by other sessions stay loaded but are
+   masked: they add nothing to this turn. A user's `knowledge` and fast slabs are never applied
+   to another user's tokens. This also keeps every session's cache valid, because no other
+   session's slab ever contributed to it.
+2. "Pinned" in step 1 above means pinned while that user has a live session, not for ever: the
+   fast slab of a user with no session holds no slot.
+3. If the turn's slabs do not fit in free slots plus slots held by no session, the engine
+   **parks** other sessions, least recently active first, until they fit: a parked session's KV
+   cache is dropped and its slabs released. Its next turn re-prefills the context, which is a
+   safe point for it. The current session's own overflow is handled by step 3 of the list above.
+4. If one session alone needs more slots than exist, its lowest-ranked selected slabs are left
+   out for that turn and the event is logged.
+
+Parking costs the parked user one re-prefill. Its rate is reported; a high rate means
+`slabs.slots` is too small for the number of concurrent users.
+
 **Approximation to verify (E-STALE):** pinning removes eviction under a live cache, but *adding*
 a sealed slab mid-session still leaves earlier tokens' KV entries computed without it. This is
 treated as "that slab's gate was closed on earlier tokens".
@@ -129,9 +152,14 @@ change it only at safe points.
 
 ```
 worker: create shadow ──train (P03)──> commit tests (P06 §5) ──pass──> mark PENDING, write temp file
-serving: at next safe point ──> hotset.commit(shadow) ; rename temp file ; ledger bookkeeping ; log 'commit'
+serving: at next safe point ──> rename temp file to <id>.v<n+1>.safetensors ; ledger transaction ; hotset.commit(shadow) ; delete <id>.v<n>
 ```
 
+- **Order at the commit (D-47).** File first, outside any transaction; then one short
+  metadata-only transaction (which also logs `commit`); then the slot change; then removal of
+  the previous version's file. A crash before the transaction leaves a file the ledger does not
+  reference, which start-up deletes; a crash after it leaves the new version recorded and an
+  old file to delete. In neither case does the ledger name a file that is missing.
 - **Ledger bookkeeping happens at the commit, in one transaction, not when the shadow becomes
   pending:** `slabs.version += 1`, `link` of the newly trained entries, centroids, `m_ref`
   reference, new `probe_scores`, state changes (seal, retire). A pending shadow carries this as
@@ -189,7 +217,9 @@ Two modes, chosen by `runtime.worker_mode`:
   `generating` is set. The only overlap is a step already in flight when a turn arrives, so worker
   steps are kept short: `runtime.max_step_s` caps a step's wall time by shrinking
   `train.batch_tokens` adaptively. Worst-case added first-token latency is one capped step.
-  `torch.set_num_threads(runtime.serve_threads)` is set once for the process.
+  `torch.set_num_threads(runtime.serve_threads)` is set once for the process. While it waits,
+  the worker holds no computation graph or activation tensors from a step: on a GPU they would
+  take memory the serving prefill needs (§11).
 - **`process`: separate worker process.** The worker loads its own handle to the base weights
   (CPU: shared memory, so no second copy; GPU: a second copy or a second device), sets its own
   `runtime.worker_threads` and CPU affinity, and may train while the server generates. The
@@ -239,6 +269,7 @@ live; the evaluation harness uses it to make cycles deterministic.
 | Failure | Response |
 |---|---|
 | Process killed mid-training | On start, delete temp slab files and discard shadows. Committed files are intact (atomic rename). |
+| Process killed during a commit | On start, delete every slab file and `_originals` directory that no `slabs` row or `pack` event references, and every version file older than the row's `path`. |
 | Slab file missing or unreadable at `ensure` | Log `error`, queue a rebuild from the ledger (P08 §5), serve the turn without it. |
 | Out of memory in the worker | Halve `train.batch_tokens` for that job and retry once; then fail the job and log. |
 | Worker exception | Log `error` with traceback; the job is dropped; the worker continues. Serving is unaffected. |
@@ -258,6 +289,25 @@ live; the evaluation harness uses it to make cycles deterministic.
 | I-P04-7 | Killing the process during training and restarting leaves every committed slab loadable and no temp files. | tiny |
 | I-P04-8 | Assistant turns are stored with `trainable=0`. | unit |
 | I-P04-9 | Within a session no slab is unloaded while the session holds a KV cache; exceeding slot capacity triggers a re-prefill. | tiny |
+| I-P04-11 | With two users' sessions live, no slab of user A's `knowledge` or fast namespace has a non-zero applied weight on any token of user B's turn, and user A's next turn gives the same logits as if user B's turn had not happened. | tiny |
+| I-P04-12 | When the pool is full, another session is parked: its cache is dropped, its next turn re-prefills, and no slot is overwritten while a session holding it has a cache. | tiny |
+| I-P04-13 | After context eviction, a chunk that was only in the dropped turns can be recalled again, and is not duplicated while it is still in context. | unit |
+| I-P04-14 | A process kill at each point of a commit (before the file, between file and transaction, after the transaction) leaves, after restart, a ledger whose every `path` exists and no unreferenced slab file. | tiny |
 | I-P04-10 | In `thread` mode no optimiser step starts while `generating` is set, and no step exceeds `runtime.max_step_s` by more than 50%. | tiny |
 
 **Gate for P2 exit:** see `04_BUILD_PLAN.md`. Experiments E-STALE and E-L1 are specified in `P12`.
+
+---
+
+## 11. GPU-profile hazards (checked at T5.1)
+
+These cannot be settled on the `dev` machine. Each is recorded with what is known and what T5.1
+must measure. The arithmetic was checked; the hazards themselves and the remedies named by the
+fourth review are **not verified here** (`05` §4).
+
+| Hazard | What is known | Action at T5.1 |
+|---|---|---|
+| Context length on 24 GB | The KV cache of the 14B base in bf16 is 6.0 GiB at 32,768 tokens and 3.0 GiB at 16,384 (48 layers × 2 × 8 KV heads × 128 × 2 bytes per token; computed). With a 4-bit base, prefill workspace and a training step this is at or over 24 GB. | `gpu24` starts at `base.context_tokens: 16384`. Measure peak memory for serving alone and with a worker step; raise the context only on measurement. |
+| Allocator fragmentation | Long-lived KV blocks of varying size next to large short-lived training graphs can fail an allocation while free memory remains. | Measure allocated against reserved memory over a long run. Remedies to try in order: a preallocated (static) KV cache; the allocator's expandable-segments setting (confirm the supported way to set it in the installed PyTorch); `worker_mode: process` with its own memory limit. |
+| Per-token launch overhead | `SlabLinear` runs a dozen or so small operations per module, on 96 modules of the 14B base, for every decoded token. Their launch cost does not shrink with model size and is outside the FLOP estimate of P02 §9. It counts against G-13. | Measure decode time per token with 0 and with full slots. Remedies in order: skip modules with no active slot (already specified), fewer separate operations in the gate path, compilation of the module, and only then a fused custom kernel. |
+| Mixed precision | Covered now: the gate path is `float32` (P02 §5.2, I-P02-20). | Re-run I-P02-20 on real activations of the GPU base. |

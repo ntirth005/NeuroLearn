@@ -55,7 +55,10 @@ entry, P08's rebuild job is queued ahead of this write.
    safe point, otherwise of its committed tensors. Starting from the committed version while a
    pending one exists would drop the earlier write when the new shadow replaces it (P04 §6.1);
    in a long session with no safe point only the last write would survive.
-5. **Decay once:** `θ ← (1 − write.fast_decay) · θ` for the shadow's `A`, `B`.
+5. **Decay once:** `B ← (1 − write.fast_decay) · B` for every module of the shadow. `A` is not
+   scaled: its rows are orthonormal, the next retraction would restore their norm and move the
+   factor into `B`, so scaling both decays the update by `(1 − γ)²` and leaves `A` unchanged
+   anyway (checked numerically, `05` §3.6).
 6. **Update** for `write.fast_steps` steps. Each step's batch (P03 §6.6 proportions) is drawn from:
    this turn's samples and raw entry, the **ring buffer** (the last `write.ring_size` fast-slab
    samples), anchor text and refusal probes. Loss is the full P03 objective with `L_replay` taken

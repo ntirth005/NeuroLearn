@@ -26,6 +26,7 @@
 | **Gate weight `w`** | The gate's output in `[0,1]`. Depends only on the token and that slab, never on other slabs. |
 | **Applied weight `ŵ`** | What the slab's update is actually multiplied by: `w` if the slab survives the top-k cap on that token, else 0. Equal to `w` whenever at most `k` slabs are open. The only quantity that can depend on other loaded slabs. |
 | **Cap-binding rate** | Share of tokens on which the cap set some open slab's `ŵ` to 0. |
+| **Parked session** | A session whose KV cache was dropped and whose slabs were released to make room for another session; it re-prefills on its next turn. |
 | **Primary owner** | The one non-retired level ≥ 2 slab that lists an entry with `role='primary'`. |
 | **Canary** | A short distinctive substring of an entry (at most 32 bytes) used to byte-search files after a forget. |
 | **Slot** | One of `slabs.slots` preallocated positions in each adapted module that a slab is loaded into. |
@@ -149,6 +150,8 @@ python -m neurolearn.eval.run        --config ... --stream <seed> --cycles N --s
 - Never lower a gate threshold to make a failing test pass.
 - Never commit a slab from the worker thread.
 - Never delete an `entries` row. Forgetting wipes content and leaves a tombstone (P08).
+- Never start a ledger write without `BEGIN IMMEDIATE`, and never touch a file inside one (D-47).
+- Never call a pack or concatenation "lossless" or "exact" without saying "weights" (D-45).
 - Never put entry text, derived text or a forget query into an event payload or a log line.
 - Never call forgetting "exact unlearning" or the refusal-agreement figure a "safety rate" (D-35, D-39).
 - Never report a number that was not produced by a run in this repository.

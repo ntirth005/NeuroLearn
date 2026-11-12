@@ -88,6 +88,8 @@ without changing `ΔW`:
 ```python
 def canonicalise(B, A):
     Q, R = torch.linalg.qr(A.T)      # A.T = Q R, Q: (d_in, r), R: (r, r)
+    d = torch.sign(torch.diagonal(R)); d[d == 0] = 1
+    Q, R = Q * d, d[:, None] * R     # make R's diagonal positive; Q R is unchanged (D-44)
     return B @ R.T, Q.T              # B' A' == B A, rows of A' orthonormal
 ```
 
@@ -121,8 +123,23 @@ inference-time cut-off, so there is no train/inference mismatch and no jump at t
   receives gradient from its first step and learns to close on unrelated text through the anchor
   term. A closed-start value would leave a new slab in the ramp's zero region with `B = 0` and
   no gradient at all. E-GATE compares both.
-- **Constraint `τ ≤ 1`.** For small `e`, `s ≈ (e·d_in/r)^{1/τ}·e^{−φ/τ}`, so `ds/de ∝ e^{1/τ−1}`,
-  which stays bounded as `e → 0` only when `τ ≤ 1`. Config validation rejects `τ > 1`.
+- **Gradients of the ramp (D-43).** With `δ > 0` the gate is exactly 0, with zero gradient,
+  for every `e` below the cut `e_cut = (r/d_in)·e^{φ}·(δ/(1−δ))^τ`; nothing diverges as `e → 0`
+  for any `τ`. At the cut the slope jumps from 0 to `dw/dg = δ/τ` (0.2 at the defaults): a kink
+  of the same kind as a ReLU's, not a pole. In `e` units the same slope reads
+  `dw/de = δ/(τ·e_cut)`, about 1,150 at the defaults on a 14B module, only because `e` is of
+  order `1e-4` there; what reaches the parameters is `|dw/dφ| ≤ 1/(4τ(1−δ))` and
+  `|dw/dA| = (dw/de)·2√(e(1−e))`, which is 30 at the cut and at most 52 over the whole open
+  range at the defaults (`reference/verify_gate_and_retraction.py`, `05` §3.6). No smoothing is
+  applied. `τ ≤ 1` is still required by config validation, so that a profile that sets `δ = 0`
+  keeps bounded gradients (`ds/de ∝ e^{1/τ−1}` as `e → 0`).
+- **Dead gates (D-43).** Below the cut a slab receives no gradient at all, `φ` included, so a
+  slab whose gate is 0 on every token of its own training samples can never recover. This cannot
+  happen in the first steps: with `B = 0` the anchor and safety terms are at their minimum and
+  give no gradient to `φ` or `A`. It can happen later if those terms push `φ` up faster than
+  `A` aligns with the domain. `train_slab` therefore tracks the mean gate weight on the tokens
+  of the new samples; if it is 0 for a whole batch, `φ` is reset to `slabs.phi_init` for the
+  modules concerned and the event is counted in the train report (P03 §7).
 - Each slab's `w` depends only on `x` and that slab. There is no normalisation across slabs.
   `w` is the **gate weight**. What multiplies the update is the **applied weight** `ŵ` of §4.2,
   which equals `w` unless the cap binds (D-34). Statements about independence in these specs
@@ -138,11 +155,13 @@ If more than `slabs.top_k` gated slabs have `w > 0` on a token, keep the `k` wit
 `ŵ = w`, unchanged:
 
 ```
-m̃_b = (m_b − mean_b) / std_b
+m̃_b = (m_b − mean_b) / max(std_b, slabs.m_ref_std_floor)
 ```
 `mean_b`, `std_b` are the mean and standard deviation of slab `b`'s margin over the tokens of its
 own training samples, measured once when the slab is committed and stored with it (`m_ref`).
-They are frozen, not running statistics. Raw margins are not comparable between slabs trained
+They are frozen, not running statistics. The floor on `std_b` matters for slabs trained on
+very uniform text (dates, account numbers): their margin barely varies, and without a floor a
+token slightly above such a slab's mean would outrank every other slab by a wide margin. Raw margins are not comparable between slabs trained
 separately (D-28); `m̃` asks "how typical is this token of each slab's own domain".
 
 - No gradient flows through the selection. `ungated` slabs always have `w = 1` and do not count.
@@ -168,16 +187,29 @@ A slab is kept canonical **throughout** training by a retraction after every opt
 (D-29). No gradient is ever taken through a QR factorisation or a triangular solve.
 
 ```python
-def retract(A, B, state):                    # after each optimiser step, per module, no_grad
-    Q, R = torch.linalg.qr(A.T)              # A.T = Q R ; R is r x r
+def retract(A, A_prev, B, state):            # after each optimiser step, per module, no_grad
+    step = A - A_prev
+    step -= (step @ A_prev.T) @ A_prev       # drop the part of the step inside the old row space
+    Q, R = torch.linalg.qr((A_prev + step).T)   # A.T = Q R ; R is r x r
+    d = torch.sign(torch.diagonal(R)); d[d == 0] = 1
+    Q, R = Q * d, d[:, None] * R             # positive diagonal: R is now close to I
     A.copy_(Q.T)                             # rows orthonormal again
-    B.copy_(B @ R.T)                         # B A unchanged
+    B.copy_(B @ R.T)                         # B A unchanged by the factorisation
     state.transform_momentum(B_factor=R.T, A_factor=inverse_transpose(R))   # see below
 ```
 
+- **Why the row-space part of the step is dropped (D-44).** A step `M A` inside the row space
+  (`M` any `r×r` matrix) changes `B A` exactly as the step `B M` on `B` would. It is a redundant
+  direction: `B` already owns it, and leaving it in only moves scale between `A` and `B` at each
+  retraction. Without it `A_prev + step` is orthonormal to second order, so `R = I + O(‖step‖²)`
+  (measured: `|R − I|` falls from `6e-4` to `5e-5` for the same step).
+- **Why the sign fix.** LAPACK's QR does not make `R`'s diagonal positive. When the canonical `A`
+  came from an SVD (after prune or pack) every retraction returned `R` with `−1` on the diagonal
+  in a 200-trial check. `B A` is still preserved, but `R ≈ I`, which the momentum transform and
+  the second-moment argument below rely on, is false without the fix.
 - The forward pass therefore always uses the plain canonical gate of §4.1 with `e = ‖A z‖²/‖z‖²`.
 - After one small step `A` is only slightly off orthonormal, so `R ≈ I` and is well conditioned.
-  If `R`'s smallest diagonal magnitude falls below `1e-4` (rank collapse), re-draw the
+  If `R`'s smallest diagonal value falls below `1e-4` (rank collapse), re-draw the
   deficient rows orthogonal to the rest, zero the matching columns of `B`, and log it.
 - **Optimiser state.** The retraction is a change of basis. First-moment buffers are transformed
   with it: `S_B ← S_B Rᵀ`, `S_A ← R⁻ᵀ S_A`. Adam's second-moment buffers have no exact transform
@@ -211,7 +243,8 @@ A_hot    : (S·r, d_in)     B_hot : (d_out, S·r)     phi : (S,)
 occupied : (S,) bool       ungated : (S,) bool      group : (S,) long    slab_id : (S,) long
 ```
 
-`mu`, `sigma` : `(d_in,)` input statistics of this module (§2.1), loaded at install time.
+`mu`, `sigma` : `(d_in,)` input statistics of this module (§2.1), loaded at install time, kept
+in `float32` on every profile.
 
 Empty slots hold zeros and `occupied = False`. Slot tensors are buffers, not parameters
 (`requires_grad = False`).
@@ -224,13 +257,14 @@ def forward(self, x):                                   # x: (..., d_in)
     ctx = SlabContext.current()
     if ctx.disabled:                                    # teacher mode: exact base
         return y
-    xs = (x.to(self.A_hot.dtype) - self.mu) / self.sigma   # standardised input z (§2.1)
-    u = xs @ self.A_hot.T                               # GEMM 1 -> (..., S·r)
-    x_sq = xs.pow(2).sum(-1, keepdim=True)
-    e_blk = u.unflatten(-1, (S, r)).pow(2).sum(-1)      # (..., S)
+    xs = (x.float() - self.mu) / self.sigma             # standardised input z (§2.1), float32
+    x_sq = xs.pow(2).sum(-1, keepdim=True)              # float32
+    u = xs.to(self.A_hot.dtype) @ self.A_hot.T          # GEMM 1 -> (..., S·r), slab dtype
+    e_blk = u.float().unflatten(-1, (S, r)).pow(2).sum(-1)   # (..., S), float32 from here to w
     e_grp = scatter_sum(e_blk, self.group)              # energy per gate group
     m = self.gate.margin_from_energy(e_grp, x_sq, self.phi_grp, d_in, rank_of_group)
-    w = ramp(m, delta, self.ungated_grp, self.occupied_grp)             # gate weight, §4.1: independent per slab
+    live = self.occupied_grp & ctx.active_grp           # only this session's slabs (§6, P04 §5)
+    w = ramp(m, delta, self.ungated_grp, live)          # gate weight, §4.1: independent per slab
     w_hat = cap(w, m, k, self.m_ref_grp, self.ungated_grp)              # applied weight, §4.2; same in train and inference
     w_blk = w_hat.gather(-1, self.group)                # back to per-slot
     if ctx.exclude_slots: w_blk[..., ctx.exclude_slots] = 0
@@ -244,7 +278,12 @@ def forward(self, x):                                   # x: (..., d_in)
 - The whole hot set costs two dense matrix products plus per-token bookkeeping on `S` values.
   Sparsity gives isolation between slabs, not speed; speed is bounded by `S`.
 - `self.base` may be a plain or quantised linear; it is called unchanged.
-- If no slot is occupied and there is no shadow, return `y` immediately.
+- If no slot is occupied and active for this context and there is no shadow, return `y` immediately.
+- **Precision (D-50).** Standardisation, the input norm, energies, margins and gate weights are
+  computed in `float32` on every profile. `bfloat16` carries 8 significant bits: subtracting a
+  large mean from a hidden state and summing thousands of squares in it loses most of the
+  signal the gate reads. Only the two matrix products run in the slab dtype. I-P02-20 checks
+  the result against an all-`float32` path.
 
 ### 5.3 Slot groups
 
@@ -254,7 +293,8 @@ uses rank `m·r`. Top-k counts groups.
 
 ### 5.4 `SlabContext`
 
-Thread-local. Fields: `disabled` (teacher), `train` (marks a training forward pass; gating itself is identical in both), `shadow` (trainable slab
+Thread-local. Fields: `active` (the slot groups belonging to the current session and to shared
+namespaces; every other occupied slot is treated as empty), `disabled` (teacher), `train` (marks a training forward pass; gating itself is identical in both), `shadow` (trainable slab
 view or `None`), `exclude_slots` (the committed version of the slab being trained), `collect`,
 `stats`. Used as a context manager. The serving thread's default context has everything off
 except `collect`.
@@ -282,6 +322,17 @@ class HotSet:
 
 `ensure` and `commit` are called only between turns (rule 9). Warm slabs are kept in an LRU of
 `runtime.warm_slabs` entries.
+
+**One pool, several sessions (D-46).** The slots are one pool shared by every live session.
+`HotSet` records which sessions hold each slab. Two rules keep sessions apart:
+
+- **Masking.** A forward pass sees only the slots in `SlabContext.active`: the current session's
+  slabs plus shared namespaces (`core`, `refusal`, `exec` when tools are offered). Another
+  user's `knowledge` or fast slab is never applied to this user's tokens, loaded or not.
+- **No overwrite under a live cache.** `ensure` may evict only slabs held by no session. If the
+  pool is full, the engine **parks** the least recently active other session: its KV cache is
+  dropped and its slabs are released; it re-prefills on its next turn, which is a safe point
+  for it (P04 §5).
 
 ---
 
@@ -320,11 +371,16 @@ The result equals the best rank-`r_out` approximation of `ΔW_1 + ΔW_2`. It is 
 (`kept = 1`) when `r_eff(1) + r_eff(2) ≤ r_out`. `pack` returns the minimum `kept` over modules.
 `φ` of the result is not defined by algebra; P07 re-fits it.
 
+"Exact" here is a statement about the ungated weights only. Two slabs applied with two gates and
+one packed slab applied with one gate are different functions of the input even when
+`ΔW_packed = ΔW_1 + ΔW_2` to machine precision (P07 §5, D-45).
+
 ---
 
 ## 8. File format (`io.py`)
 
-One safetensors file per slab version: `slabs/<namespace>/<id>.safetensors`, tensors named
+One safetensors file per slab version: `slabs/<namespace>/<id>.v<version>.safetensors` (the
+`slabs.path` column names the live one; P04 §6.1), tensors named
 `<module_path>.A`, `<module_path>.B`, `<module_path>.phi`, `<module_path>.m_ref` (mean and
 standard deviation of the own-domain margin, §4.2), stored in the slab dtype of the profile
 (`bfloat16` on GPU, `float32` on `dev`). Header metadata: `slab_id`, `version`, `rank`,
@@ -365,6 +421,11 @@ overhead is a P11 metric.
 | I-P02-16 | When more than `k` slabs are open on a token, selection follows calibrated margin; with `k` or fewer open, the cap changes nothing. | unit |
 | I-P02-17 | Under the cap every slab's `ŵ` is either its own `w` or 0 (no rescaling); collected statistics report `w` and `ŵ` separately, and the cap-binding and per-slab drop rates computed from them match a direct count. | unit |
 | I-P02-18 | With a trained shadow live in commit-test mode, model outputs equal the outputs after that shadow is committed into a slot, including on tokens where more than `k` slabs are open. | tiny |
+| I-P02-19 | `canonicalise` and `retract` return `R` with a positive diagonal, for a canonical `A` produced by QR and for one produced by an SVD; after a step of relative size `1e-3`, `|R − I|` is below `1e-3`, and below `1e-4` once the row-space part of the step is dropped. | unit |
+| I-P02-20 | With `bfloat16` slabs, gate weights from the specified path (float32 standardisation, norms and energies) differ from an all-`float32` reference by less than `1e-2` on anchor activations with a large mean component; the all-`bfloat16` path's error is reported beside it. | unit |
+| I-P02-21 | A slab whose gate is 0 on every own-sample token of a batch has `φ` reset to `phi_init` and the reset is counted; a slab with `B = 0` gets zero gradient on `φ` and `A` from the anchor and safety terms. | tiny |
+| I-P02-22 | Slots not in `SlabContext.active` contribute nothing and are not counted by the cap, whatever they hold. | unit |
+| I-P02-23 | With an own-domain margin std below `slabs.m_ref_std_floor`, the calibrated margin uses the floor. | unit |
 | I-P02-7 | `pack` equals the truncated SVD of the dense sum; is exact when effective ranks fit; returns canonical factors. | unit |
 | I-P02-8 | Save then load reproduces tensors bit for bit. | unit |
 | I-P02-9 | No base parameter has `requires_grad=True` or changes value after any slab operation. | tiny |

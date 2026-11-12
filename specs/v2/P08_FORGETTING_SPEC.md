@@ -180,6 +180,12 @@ costs nothing permanent, and a wrong supersession is reversible because the old 
 3. Zero the fast slab if it is in `slab_ids`.
 4. Queue a rebuild (§5) for each level ≥ 2 slab in `slab_ids`. Unlike forget, the old slab
    version keeps serving until the rebuild commits; recall already shows the new entry.
+   **The new entry takes the old one's place (D-48):** if `new_id` is trainable, not yet
+   consolidated and not recall-only, the rebuild of the old entry's primary owner includes it,
+   and it is linked to that slab as `primary` when the rebuild commits (P04 §6.1), never
+   before. Otherwise the rebuilt slab would hold neither value until the next consolidation
+   happened to assign the new entry somewhere. If the rebuild fails, the new entry stays
+   unconsolidated and the next cycle assigns it as usual.
 5. `unsupersede(old_id)` restores status `active` and queues the same rebuilds.
 
 ---
@@ -189,7 +195,8 @@ costs nothing permanent, and a wrong supersession is reversible because the old 
 `rebuild(slab_id) -> CommitReport | None`. Used by forget, supersession, the probe sweep (P06 §6),
 missing-file recovery (P04 §9) and base replacement (P12).
 
-1. Sources = `slab_sources(slab_id)` minus entries that are `forgotten` or `superseded`.
+1. Sources = `slab_sources(slab_id)` minus entries that are `forgotten` or `superseded`, plus
+   any superseding entry handed over by §4.2 step 4.
 2. If no trainable source remains: mark the slab `retired`, unload it, delete its file. Done.
 3. If derived samples for remaining sources are below `consolidate.derived_per_entry` (some were
    deleted because they also cited the removed entry), top them up with `derive`.
@@ -265,6 +272,7 @@ def suppress(engine, user: str, topic: str) -> CommitReport: ...
 | I-P08-10 | The behavioural check detects a planted leak: when a second entry restating the fact is left in the ledger, `behavioural_removal` reports `not removed` with recall on and names that entry; when a slab holding the fact is deliberately left out of the rebuild, it reports `not removed` with recall off. | tiny |
 | I-P08-11 | Resolve lists as a restatement an entry that repeats the target's canary in different wording, and never changes anything before confirmation. | unit |
 | I-P08-12 | Held probes and canaries are never written to disk, and neither the forget query nor any entry text appears in `events`. | tiny |
+| I-P08-14 | After a supersession whose rebuild commits, the new entry's primary owner is the slab that owned the old entry, its probes pass in that slab with recall off, and it was not linked before the commit. | tiny |
 | I-P08-13 | A forget interrupted by a process kill ends, after restart, with the affected slabs rebuilt and a `forget_done` whose byte search and behavioural check read `not performed`. | tiny |
 
 **Acceptance test (slow, P11 stream, part of the P4 gate):**

@@ -34,7 +34,9 @@ and apply the decision rule. If the rule changes a decision, add or update the d
   tokens while each holds answers the others do not. Evaluate each one's probes (iv) alone and
   (v) with all `k + 2` loaded, where the cap must bind. Repeat (v) with three different subsets
   of `k + 1` loaded to see how the outcome moves with the hot set.
-- **Also vary:** `phi_init` open-start (−1.1) vs closed-start (1.386);
+- **Also vary:** `phi_init` open-start (−1.1) vs closed-start (1.386); `φ` trained at the full
+  learning rate vs at a tenth of it for the first epoch, reported with the number of dead-gate
+  resets (P02 §4.1);
   `slabs.gate_deflate_rank` 0 vs 8 (P02 §2.1), reported with the share of variance the removed
   directions held.
 - **Metrics:** probe pass rate in (i)–(iii); own-domain gate vs anchor gate; anchor KL;
@@ -98,6 +100,13 @@ and apply the decision rule. If the rule changes a decision, add or update the d
   hurts is empirical.
 - **Setup:** at equal parameter count per slab, 20 cycles each: `{q,v}` (default), `{q,k}`,
   `{q,k,v}`, `{q,o}`, and `{q,v,down_proj}`. Input statistics (P02 §2.1) are built per module set.
+- **Rank allocation arms (fourth review).** On grouped-query models `q_proj` writes to many more
+  heads than `v_proj` (40 against 8 on the 14B base). A rank-8 update of `q_proj` still reaches
+  every head, since `B` has a row per output dimension, but all heads share the same 8 input
+  directions. Whether that limits anything is empirical, so two more arms at equal parameter
+  count: (i) unequal rank, `r_q = 16` or `32` with `r_v = 8` (slot width becomes per module);
+  (ii) one `A` shared by `q_proj` and `v_proj` of a layer, which see the same input, with
+  separate `B`: one gate per layer and half the first matrix product.
 - **Decision rule:** change D-13 only if plasticity improves without a retention or anchor-KL loss.
 - **Result:** not run.
 
