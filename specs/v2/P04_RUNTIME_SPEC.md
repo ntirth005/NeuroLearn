@@ -129,13 +129,25 @@ change it only at safe points.
 
 ```
 worker: create shadow ──train (P03)──> commit tests (P06 §5) ──pass──> mark PENDING, write temp file
-serving: at next safe point ──> hotset.commit(shadow) ; rename temp file ; slabs.version += 1 ; log 'commit'
+serving: at next safe point ──> hotset.commit(shadow) ; rename temp file ; ledger bookkeeping ; log 'commit'
 ```
+
+- **Ledger bookkeeping happens at the commit, in one transaction, not when the shadow becomes
+  pending:** `slabs.version += 1`, `link` of the newly trained entries, centroids, `m_ref`
+  reference, new `probe_scores`, state changes (seal, retire). A pending shadow carries this as
+  a plan. If the process stops before the safe point, the temp file is deleted (§9) and the
+  ledger still shows those entries as unconsolidated, so the next cycle trains them again.
+  Linking earlier would record knowledge in a slab version that never went live.
 
 - The worker never touches slot buffers. It trains tensors it owns and reads slots through the
   normal forward pass.
 - A failed commit test discards the shadow. Nothing live changes.
-- At most one shadow per slab exists. A newer pending shadow for the same slab replaces an older one.
+- At most one shadow per slab exists. A newer pending shadow for the same slab replaces an older
+  one, so a new shadow is always started from the pending version when there is one, and its
+  plan includes the older plan's entries.
+- A forget or supersede cancels every queued or running worker job, and every pending shadow,
+  that involves the affected entries (the worker checks a cancel set wherever it checks
+  `should_yield`); their text must not stay in worker memory or come back through a late commit.
 
 ### 6.2 Safe points
 
@@ -207,7 +219,7 @@ class Engine:
     def ingest_file(self, user: str, path: str, trainable: bool = True) -> int: ...   # trainable=False: recall-only (P10 §5)
     def end_session(self, session_id: str) -> None: ...
     def forget(self, user: str, query: str, confirm_ids: list[int] | None = None,
-               deep: bool = False) -> "ForgetReport": ...          # P08 §2
+               deep: bool = False) -> "ForgetReport": ...          # P08 §2; the query is never appended to the ledger
     def run_consolidation(self) -> "CycleReport": ...              # synchronous, for CLI and P11
     def status(self) -> dict: ...                                  # slabs by state/tier, pending, queue length, last events
     def shutdown(self) -> None: ...

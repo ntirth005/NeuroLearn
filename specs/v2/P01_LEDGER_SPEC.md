@@ -25,7 +25,7 @@ operations they call are defined here).
 
 ```
 <paths.data_dir>/
-  ledger.sqlite                    # WAL mode
+  ledger.sqlite                    # WAL mode; ledger.sqlite-wal and -shm beside it hold content too (§4.7)
   slabs/<namespace>/<slab_id>.safetensors
   slabs/_originals/<event_id>/     # pre-compaction copies (P07)
   stats/<stats_id>.safetensors     # per-module input mean and std of the base (P02 §2.1)
@@ -41,6 +41,9 @@ Namespaces containing `/` (e.g. `knowledge/alice`) map to nested directories.
 ## 3. Schema
 
 `schema.sql` is applied once at creation. `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`
+Every connection also sets `PRAGMA secure_delete=ON`, and the FTS5 table is created with its
+`secure-delete` option on (`INSERT INTO chunks_fts(chunks_fts, rank) VALUES('secure-delete', 1)`,
+SQLite ≥ 3.42). Both are required by §4.7; start-up fails if either cannot be set.
 
 ```sql
 CREATE TABLE entries (
@@ -76,6 +79,7 @@ CREATE TABLE derived (
   answer      TEXT NOT NULL,
   teacher_nll REAL, consistency REAL, novelty_kl REAL,
   reference_score REAL,                        -- teacher probe score with sources in context
+  rollout_ok  INTEGER,                         -- probes: teacher reproduces the answer by greedy decoding (P03 §5)
   origin      TEXT NOT NULL CHECK (origin IN ('model','oracle')),
   created_ts  TEXT NOT NULL
 );
@@ -146,6 +150,12 @@ CREATE TABLE events (
   `role='replay'`: its samples were replayed while training this slab (P03 §6.3). `samples_for`,
   `probes_for`, centroids and `real_tokens` use `primary` rows only; forget and supersession use
   all rows.
+- **L-6** Ownership (D-36). Among slabs of level ≥ 2 whose state is not `retired`, an entry has
+  **at most one** `primary` row (exactly one once it is consolidated) and any number of `replay`
+  rows. The fast slab (level 1) may list the entry as well. A retired slab keeps its rows as
+  history; they count for nothing except the forget fan-out of files that still exist.
+- **L-7** No event payload and no log line contains entry text, derived text or a forget query.
+  Payloads carry ids and measured values only.
 
 ### 3.2 Entry status
 
@@ -178,8 +188,8 @@ Payloads are JSON objects with at least the ids involved and any measured values
 
 1. Normalise whitespace; compute `sha256`. If an identical non-forgotten entry exists for this
    user, return its id.
-2. Insert the entry. `trainable = 0` if `source == 'assistant'` or the caller passed
-   `trainable=False` (recall-only ingestion, P10 §5).
+2. Set `trainable = 0` if `source == 'assistant'` or the caller passed `trainable=False`
+   (recall-only ingestion, P10 §5). Nothing is written yet.
 3. Chunk (§4.2) and embed (§4.3) **before** opening a transaction. Then insert the entry, its
    chunks and their FTS rows in one short transaction. For an entry with more than
    `ledger.ingest_batch_chunks` chunks (a file), insert the entry row first with status
@@ -228,12 +238,13 @@ re-embed every chunk and recompute every slab centroid.
 | `add_derived(rows, source_entry_ids)` | Inserts derived rows and their sources. |
 | `samples_for(slab_id)` | Non-probe derived rows whose sources are all `active`/`pending` entries in `slab_sources(slab_id)`, plus those entries' raw text. |
 | `probes_for(slab_id)` | Probe rows on the same condition. |
-| `unconsolidated(namespace)` | Trainable `active`/`pending` entries not in `slab_sources` of any level ≥ 2 slab. |
-| `link(slab_id, entry_ids)` | Inserts `slab_sources` rows; adds token counts to `real_tokens`. |
+| `unconsolidated(namespace)` | Trainable `active`/`pending` entries with no `primary` row in a non-retired level ≥ 2 slab (L-6). `replay` rows and rows of retired slabs do not count. |
+| `link(slab_id, entry_ids, role='primary')` | Inserts `slab_sources` rows. For `primary`: adds token counts to `real_tokens` and raises if the entry already has a primary owner (L-6). For `replay`: no other effect. |
 | `set_probe_scores(slab_id, scores, at_commit)` | Upserts `probe_scores`. |
 | `bump_access(gate_mass: dict[slab_id, float])` | Updates `access_ema`, `last_access_ts`, and `cofire` for every pair with mass above zero. EMA factor 0.05. |
 | `mark_superseded(old_id, new_id) -> list[slab_id]` | Sets status and `supersedes_id`; returns level ≥ 1 slabs in `slab_sources(old_id)`. |
-| `wipe(entry_id) -> list[slab_id]` | Forget: sets `text=''`, status `forgotten`; deletes its chunks, FTS rows and in-memory embeddings; deletes every derived row citing it (and their `derived_sources`, `probe_scores`); returns affected slabs. |
+| `wipe(entry_id) -> list[slab_id]` | Forget, logical step: sets `text=''`, `sha256=''`, status `forgotten`; deletes its chunks, FTS rows (FTS5 `'delete'` command with the old text) and in-memory embeddings; deletes every derived row citing it (and their `derived_sources`, `probe_scores`); returns affected slabs (all roles, retired included). Not sufficient on its own: see §4.7. |
+| `erase_residue(canaries) -> ErasureReport` | Forget, physical step (§4.7). |
 | `log(kind, payload)` | Inserts an `events` row. |
 
 ### 4.6 Concurrency
@@ -250,6 +261,42 @@ Each thread opens its own connection with `PRAGMA busy_timeout = ledger.busy_tim
   work (file ingestion, derived rows, probe scores) is written in batches of at most
   `ledger.ingest_batch_chunks` rows' worth, releasing the lock between batches.
 - The embedding store's lock is held only to append, to invalidate, and to take a search snapshot.
+
+### 4.7 Erasure (D-38)
+
+Deleting a row does not remove its bytes from the files. Measured on this machine
+(`reference/sqlite_forget_residue.py`, `05` §3.5): after the logical wipe the text was still in
+the WAL file and, once checkpointed, in the database file; with `secure_delete` alone its words
+were still in the FTS5 index; a truncating checkpoint was refused while another connection held
+a read snapshot. With `secure_delete`, FTS5 `secure-delete` and a completed truncating
+checkpoint, no canary remained.
+
+Three levels, kept apart in every report:
+
+| Level | Meaning | Guaranteed |
+|---|---|---|
+| Logical removal | No query through the ledger returns the content. | Yes, by `wipe`. |
+| Database-level erasure | No file in the data directory contains the content's bytes. | Yes, after `erase_residue` reports success. |
+| Media-level erasure | The storage device holds no recoverable copy. | **No.** File-system slack and journals, SSD remapping, snapshots, backups and swap are outside the process. |
+
+`erase_residue(canaries)`, called by P08 after `wipe` and after slab files are deleted:
+
+1. `PRAGMA wal_checkpoint(TRUNCATE)` on the writer connection. If it reports busy (a reader holds
+   a snapshot), wait and retry; readers here are short queries, so this resolves within
+   `ledger.busy_timeout_ms`. The step has not succeeded until the call returns `busy = 0`.
+2. Byte-search every file under `<data_dir>` except `reports/`, case-insensitively, for each
+   canary. Canaries are short substrings (at most 32 bytes) taken from the entry, its chunks and
+   the answers of its derived rows before they are wiped; they are held in memory only. Whole
+   entry text is not searched for: SQLite splits long values across overflow pages, so a long
+   needle can miss content that is present.
+3. If any canary is found in the ledger files: run FTS5 `optimize`, then `VACUUM`, checkpoint
+   again, and search again. If it is found in any other file, delete that file if it is a
+   derived artefact (slab temp file, cached logits, compaction original); otherwise fail.
+4. Return which steps ran and the search result. A forget is `done` only on a clean result.
+
+`reports/` is excluded because evaluation runs copy streams there by design; a production
+deployment does not write entry text into it. Operators who need media-level protection put
+`data_dir` on an encrypted volume and manage backups themselves; the forget report says so.
 
 ---
 
@@ -289,6 +336,10 @@ class Ledger:
 | I-P01-8 | While a 2,000-chunk file is being ingested on one thread, `append` of a chat turn on another completes within 250 ms and never raises. | unit |
 | I-P01-9 | Appending 100,000 embeddings never copies an existing block (block object identities are stable), and removing a row zeroes it. | unit |
 | I-P01-10 | No ledger transaction contains a call into the encoder or the base model (enforced by a test hook that fails if either is invoked while a write transaction is open). | unit |
+| I-P01-11 | After `wipe` and a successful `erase_residue`, no file of the ledger (`.sqlite`, `-wal`, `-shm`) contains any canary of the entry, including when the entry was checkpointed before the wipe and when a reader held a snapshot during the first checkpoint attempt. Ported from `reference/sqlite_forget_residue.py`. | unit |
+| I-P01-12 | Every connection reports `secure_delete = 1`, and the FTS5 `secure-delete` option is on. | unit |
+| I-P01-13 | `link(..., role='primary')` raises if the entry already has a primary row in a non-retired level ≥ 2 slab; `unconsolidated` returns an entry whose only primary row is in a retired slab. | unit |
+| I-P01-14 | No `events.payload` contains the text of any entry or derived row (checked over a full test run). | unit |
 
 Gate for T0.4: on the P11 synthetic stream, recall@6 of the gold source chunk for fact questions
 is reported (no threshold yet; this number becomes the baseline (a) retrieval figure).

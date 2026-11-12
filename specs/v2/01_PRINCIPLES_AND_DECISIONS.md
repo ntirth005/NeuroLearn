@@ -15,7 +15,9 @@ Every design choice in this folder follows from these five. When a spec is silen
 3. **The frozen base is the only teacher.** Synthetic training data is written by the frozen base
    while it reads real entries. The adapted model never trains on its own output.
 4. **A slab's behaviour must not depend on which other slabs are loaded.** The set of loaded slabs
-   changes every turn.
+   changes every turn. This holds exactly for a slab's gate weight. It holds for its applied
+   contribution only while the top-k cap does not bind; the cap is a bounded, measured exception
+   (D-28, D-34).
 5. **Nothing is committed without a functional test.** Every write, merge, prune and rebuild is
    checked against held-out probes and rolled back on failure.
 
@@ -28,8 +30,9 @@ then confirm or replace), `superseded`.
 
 ### D-01 Ledger as source of truth
 - **Decision:** All real inputs go to an append-only local store. Slabs are derived artefacts.
-- **Why:** Gives exact unlearning, rollback, merge verification and base-model replacement. The
-  PRD has no mechanism for any of these.
+- **Why:** Gives forgetting by rebuild with known provenance (the guarantees and their limits are
+  in D-35 and `P08` §3), rollback, merge verification and base-model replacement. The PRD has no
+  mechanism for any of these.
 - **Status:** decided.
 
 ### D-02 Fast slab replaces a Titans-style associative memory (PRD Tier 1)
@@ -59,8 +62,8 @@ then confirm or replace), `superseded`.
   within a fixed training-time hot set.
 
 ### D-05 Functional tests gate every commit
-- **Decision:** New-probe recall, neighbour retention, anchor KL, gate leak and refusal agreement
-  are checked before any slab version goes live.
+- **Decision:** New-probe recall, neighbour retention, anchor KL, gate leak and the safety
+  measures (D-39) are checked before any slab version goes live.
 - **Status:** decided.
 
 ### D-06 Commits only at safe points
@@ -132,7 +135,7 @@ then confirm or replace), `superseded`.
 
 ### D-16 Safety as a behavioural commit gate
 - **Decision:** Refusal behaviour is protected by a KL-to-base term on a refusal probe set and by
-  a refusal-agreement commit test.
+  a behavioural commit test (three measures since D-39).
 - **Why:** The alternative, projecting gradients orthogonal to a refusal direction, does not
   guarantee unchanged behaviour in a non-linear network: other layers can change the activations
   feeding that direction. Behaviour has to be measured.
@@ -147,7 +150,7 @@ then confirm or replace), `superseded`.
 - **Decision:** All mechanisms are built and tested on Qwen2.5-0.5B before any GPU work.
 - **Why:** The available machine has no discrete GPU.
 - **Consequence:** A 0.5B teacher writes poor derived samples. The evaluation harness has an
-  `oracle` teacher mode that isolates this.
+  `oracle` teacher mode that isolates this. See D-42 for what `dev` results do and do not show.
 - **Status:** decided.
 
 ### D-19 OOV handling is optional and last
@@ -175,7 +178,8 @@ then confirm or replace), `superseded`.
   high-variance dimensions and a large mean would open raw-energy gates on generic text. The
   statistics are frozen, not running, so committed slabs do not drift.
 - **Evidence gap:** anisotropy of Qwen 2.5 projection inputs has not been measured here
-  (I-P02-12 does it). Standardisation does not remove correlations.
+  (I-P02-12 does it). Standardisation does not remove correlations; an optional deflation of
+  the top principal directions is an E-GATE arm (`slabs.gate_deflate_rank`, `P02` §2.1).
 - **Status:** needs-test (E-GATE compares `standardize` with `none`).
 
 ### D-23 CPU contention: time-slicing or a worker process
@@ -199,6 +203,8 @@ then confirm or replace), `superseded`.
   acceptance rate is below `teacher.min_accept_rate`, entries are trained from them alone. The
   consistency filter is off on `dev`.
 - **Why:** Raised in external review. A 0.5B teacher will fail the filters most of the time.
+- **Limit:** rule-based cloze teaches spans that are literally in the text. It cannot teach
+  implications, paraphrase or multi-entry knowledge; those need a capable teacher (D-42).
 - **Status:** decided. Filter settings and acceptance rate are stated in every report.
 
 ### D-26 Lineage and concatenation in compaction
@@ -289,6 +295,136 @@ then confirm or replace), `superseded`.
 - **Changing the default attachment away from `q_proj`, `v_proj`.** The grouped-attention
   observation is correct but its effect is an empirical question; E-MLP now compares five
   attachment sets.
+
+### D-34 Gate weight and applied weight are separate quantities; the cap is tested under overload
+- **Decision:** Every spec distinguishes the **gate weight** `w` (a function of the token and the
+  slab alone) from the **applied weight** `ŵ` (after the top-k cap, which depends on the other
+  open slabs). Both are collected. E-GATE gains an overload condition in which more than `k`
+  slabs are open on the same tokens, and a pass condition on the cap-binding rate
+  (`slabs.max_cap_binding`). If the condition fails, the selection strategy is chosen from the
+  alternatives listed in `P12` E-GATE and recorded here.
+- **Why:** Third external review (2026-11-12), issue 1. The claim checked out in part: `P02` §4.2
+  and D-28 already said the cap is where principle 4 can break, and I-P02-5 and I-P02-16 already
+  test both sides of it. What was missing: the glossary and principle 4 used one word for both
+  quantities, E-GATE did not force the cap to bind, and "a few percent" was not a threshold.
+- **Status:** needs-test (E-GATE).
+
+### D-35 Three forget guarantees, stated separately
+- **Decision:** "Forgotten" means three things with different strength (`P08` §3): **source
+  removal** and **provenance removal** are guaranteed by construction and checked by tests;
+  **behavioural removal** is measured against the bare base on every forget and reported, never
+  inferred from a successful rebuild. The term "exact unlearning" is no longer used for this
+  system. Forget also searches for other entries that restate the fact and offers them.
+- **Why:** Third review, issue 2. Checked and true: `00` §4, D-01 and `06` C-4 said "exact
+  unlearning", which holds only with respect to the listed sources. A second entry that repeats
+  the fact survives, and so does any sample derived from it. Of the review's five reasons, two
+  were already handled (multi-entry samples are deleted with any cited entry; replayed entries
+  are in `slab_sources`), two are real (repeated information, correlated learning in other
+  slabs), one is the already-stated second-order limit.
+- **Status:** decided.
+
+### D-36 One primary owner per entry; replay dependencies are separate
+- **Decision:** Every consolidated entry has exactly one `primary` row among non-retired level ≥ 2
+  slabs and any number of `replay` rows. `unconsolidated` and I-P06-4 are defined on primary rows
+  of non-retired slabs.
+- **Why:** Third review, issue 3. Checked and true: I-P06-4 counted all `slab_sources` rows, which
+  contradicts the replay retry (`P06` §4) and I-P08-8. Checking it exposed two further faults the
+  review did not raise: a packed slab and its retired parents both list the same entries, and
+  entries of a retired slab were never returned by `unconsolidated`, so the "next consolidation
+  re-assigns them" step of `P08` §5 could not happen.
+- **Status:** decided.
+
+### D-37 Feasibility is measured before the training pipeline is built
+- **Decision:** Task T0.8 measures generation and prefill throughput, forward-plus-backward step
+  time, peak memory and disk use on the `dev` machine, and projects the wall time of one L1
+  write, one consolidation cycle and each required run. Gate G-0 records the projection. A
+  required run projected over `eval.run_budget_hours` needs a decision before P1 starts.
+- **Why:** Third review, issue 4. Checked and true: the specs name the hardware limit but contain
+  no measurement of it, and `P11` §8 fixes run sizes of 50 and 200 cycles.
+- **Status:** decided. The budget is a planning value the owner may change.
+
+### D-38 Erasure policy: logical, database-level, media-level
+- **Decision:** The ledger runs with `secure_delete` on and FTS5 `secure-delete` on. A forget is
+  not reported done until a truncating WAL checkpoint has succeeded and a byte search of the
+  data directory's files for the entry's canary strings finds nothing. Erasure from the storage
+  medium (file-system slack, SSD remapping, snapshots, backups, swap) is **not** guaranteed and
+  is said so to the user; an encrypted volume is the recommended setting.
+- **Why:** Third review, issue 5. Checked and true, by test
+  (`reference/sqlite_forget_residue.py`, `05` §3.5): after the logical wipe the text stayed in
+  the WAL and the database file; with `secure_delete` alone it stayed in the FTS5 index; a reader
+  holding a snapshot blocked the truncating checkpoint. With both settings and a completed
+  checkpoint no canary remained. I-P08-1 as written was not met by the specified operations.
+- **Not adopted:** per-entry encryption keys (cryptographic erasure). Standard `sqlite3` has no
+  encryption, and recall needs plaintext indexes; listed as X-7 in `P12`.
+- **Status:** decided.
+
+### D-39 Safety gate measures three things and does not rest on the phrase classifier alone
+- **Decision:** The commit test reports and gates **refusal preservation**, **benign
+  preservation** and **harmful-content leakage** separately. Leakage is scored on the full reply
+  by the frozen base's own likelihood of it, not by phrase patterns. `base_refuses` is
+  hand-labelled for the `eval` split. Paraphrase and adversarial variants are part of the probe
+  file. A human audit of full replies is required at each phase exit that claims G-8.
+- **Why:** Third review, issue 6. Checked and true: `is_refusal` read the first sentence of a
+  24-token reply, so a reply that refuses and then complies passed, and a benign reply with a
+  refusal phrase failed. The agreement figure is agreement with the base under a classifier; it
+  is not a safety rate and is no longer described as one.
+- **Status:** decided. Thresholds are starting values.
+
+### D-40 Clustered bootstrap; baselines reproduced before any public claim
+- **Decision:** Intervals are computed by a paired bootstrap that resamples **clusters of
+  questions sharing an underlying fact**, per seed, with seeds reported separately. A claim
+  reaches `demonstrated` only against baselines this project reproduced under a protocol recorded
+  in `P13` §6; published numbers are context, never the comparison.
+- **Why:** Third review, issue 7. Part A checked and true: the same fact is asked at several
+  lags, with recall on and off, and inside two-hop questions, so questions are not independent.
+  Part B: `P13` §3 already required same-model baselines, but `06` §3 item 2 still allowed
+  published numbers to stand in; that alternative is removed.
+- **Status:** decided.
+
+### D-41 Kill criterion G-K: one rule, one predeclared primary metric
+- **Decision:** The primary metric is the **unweighted mean of recall-on accuracy on `jargon`,
+  `style` and `multi`**, the categories that justify parametric memory (D-07). G-K passes when
+  `full` is above `a` on that metric (clustered-bootstrap 95% interval excluding zero on
+  every seed, `P11` §5.1) and is not worse than `a` on any single category. Per-category
+  differences are secondary: they are reported and set the per-category status of C-8 in `06`,
+  but they do not decide G-K.
+- **Why:** Third review, issue 8. Checked and true: the gate table read as "all three" and the
+  explanatory text as "any". The review recommends a predeclared primary metric and threshold
+  on the categories that justify parametric memory. One test on their mean does that and avoids both
+  faults of the alternatives: "any one of three" gives three chances to pass by noise, and "all
+  three" kills the work when one small category is inconclusive.
+- **Status:** decided by the spec author on 2026-11-12; **the owner should confirm** before T3.6.
+
+### D-42 Deployment target and the role of the `dev` machine
+- **Decision:** The system is meant to run on a GPU with enough memory, on Qwen, DeepSeek or
+  another supported family at roughly 8B to 32B parameters or more (owner, 2026-11-12). The
+  `dev` laptop with the 0.5B base is for building and checking mechanics. Results on `dev` in
+  `teacher.mode: model` are not evidence about learning quality at deployment size, in either
+  direction. Runs that close a gate at the listed size may be run on the GPU profile; `dev`
+  runs of reduced size are labelled as mechanics checks.
+- **Why:** Third review, issues 4 and the teacher concern. A 0.5B teacher cannot write useful
+  semantic samples and a CPU cannot time-box 50- or 200-cycle runs; neither says anything about
+  the design at its intended size. T0.8 still measures `dev`, so that the split between what is
+  run where is decided from numbers.
+- **Status:** decided. Extends D-18.
+
+### Third review: engineering concerns (section 3 of the review)
+- **P07, concatenation does not bound parameters or disk.** True and already stated (D-26,
+  `P07` §9). Adopted the review's framing: two separate resource guarantees, bounded inference
+  residency and unbounded archival storage with a measured growth rate (`P07` §9, G-9).
+- **P09, unsupported JSON Schema weakens the guarantee.** True. Each tool now has a recorded
+  constraint level; a call for a tool outside the subset is validated after decoding and is
+  never executed if it fails (`P09` §6).
+- **P04, mid-session slab loads need stronger evaluation.** True: E-STALE measured one reply at
+  100 points. It now varies depth, number of slabs and turns after the load, checks rollouts,
+  and has a suffix re-prefill arm (`P12`).
+- **P03, a 0.5B teacher and rule-based cloze cannot give semantic learning.** True. Stated as a
+  limit in `P03` §4; `dev` evaluates `multi` and `implication` learning in oracle mode only (D-42).
+- **P02, standardisation does not whiten.** True and already stated (D-22). Added an
+  experimental arm that removes the top principal directions from the gate (`P02` §2.1,
+  E-GATE); full whitening stays not adopted.
+- **P05, L1 may add little over retrieval.** True and already stated (`P05` §1); E-L1 decides.
+  No change.
 
 ---
 

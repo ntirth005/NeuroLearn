@@ -2,7 +2,7 @@
 
 **Status:** design specification. Nothing is implemented. Update the status tables in
 `04_BUILD_PLAN.md` as work lands.
-**Date written:** 2026-11-11
+**Date written:** 2026-11-11 · **Last revised:** 2026-11-12 (three external reviews applied; decisions D-22 to D-42)
 **Source requirement:** PRD "Project Neurolearn v2.0 (Localized Lifelong Continual Learning Architecture)"
 
 This folder is the complete design for Neurolearn v2.0, split so that one component can be built
@@ -22,7 +22,7 @@ If you are about to do work on this project, do these in order:
    `02_CONVENTIONS_AND_GLOSSARY.md`. They are short and every other file assumes them.
 2. Open `04_BUILD_PLAN.md` §0 "Current position". It names the next task, anything half-done and
    any blockers. Tasks are ordered; do not skip ahead of an unfinished phase exit test.
-3. Read the pillar spec the task points to (`P01`…`P12`). Each pillar spec is standalone: it lists
+3. Read the pillar spec the task points to (`P01`…`P13`). Each pillar spec is standalone: it lists
    its dependencies, data structures, algorithms, interface, tests and gates.
 4. Implement exactly what the spec describes. Write the tests it lists.
 5. Run the tests. Report results as measured. Before stopping, update `04_BUILD_PLAN.md`: the
@@ -47,7 +47,6 @@ Rules that hold everywhere are in §6 below. Break none of them without a decisi
 | `04_BUILD_PLAN.md` | Phases P0–P5, ordered tasks, exit tests, status tables | To find what to do next |
 | `05_RESEARCH_NOTES.md` | Sources, what each supports, what was verified and what was not | Before citing a number or changing a research-based decision |
 | `06_CLAIMS_AND_EVIDENCE.md` | Every claim, its current evidence, and the run that would prove it; rules for saying "state of the art" | Before describing the project to anyone; after every proving run |
-| `P13_PUBLIC_BENCHMARKS_SPEC.md` | Public benchmarks against published methods; support for other model families | Phases P1, P3, P5 |
 | `P01_LEDGER_SPEC.md` | Episodic ledger, chunking, recall | Phase P0 |
 | `P02_SLAB_SUBSTRATE_SPEC.md` | Slab format, gate, forward pass, algebra, file I/O | Phase P1 |
 | `P03_TEACHER_AND_TRAINING_SPEC.md` | Derived samples, filters, probes, loss, `train_slab` | Phases P1–P2 |
@@ -60,8 +59,10 @@ Rules that hold everywhere are in §6 below. Break none of them without a decisi
 | `P10_SAFETY_SPEC.md` | Alignment-drift gate and ingestion hygiene | Phase P3 |
 | `P11_EVALUATION_SPEC.md` | Synthetic user, baselines, metrics, gates, kill criterion | Phase P0 onward |
 | `P12_EXTENSIONS_SPEC.md` | Experiments register and optional features (OOV table, edit slabs, base swap, multimodal) | Phases P1–P5 as referenced |
+| `P13_PUBLIC_BENCHMARKS_SPEC.md` | Public benchmarks against published methods; support for other model families | Phases P1, P3, P5 |
 | `reference/verify_slab_math.py` | NumPy script that checks the slab algebra; results in `05` §3.1 | Task T1.2 |
 | `reference/sqlite_wal_contention.py` | Script showing SQLite readers are not blocked by a writer but writers block each other; results in `05` §3.4 | Task T0.3 |
+| `reference/sqlite_forget_residue.py` | Script showing what a logical wipe leaves in the SQLite files and which settings remove it; results in `05` §3.5 | Tasks T0.3, T4.5 |
 
 ---
 
@@ -102,7 +103,9 @@ Rules that hold everywhere are in §6 below. Break none of them without a decisi
 - The **frozen base** is never modified. It writes all synthetic training data while reading real
   ledger entries in its context.
 - At inference, a turn-level router loads relevant slabs into fixed **slots**; a token-level gate
-  decides per token which loaded slabs contribute. When no gate fires, the model is exactly the base.
+  decides per token which loaded slabs contribute. Each slab's gate weight depends on that slab
+  alone; a top-k cap then bounds how many are applied to one token. When no gate fires, the model
+  is exactly the base.
 
 ### Mapping from the PRD tiers
 
@@ -132,18 +135,19 @@ Rules that hold everywhere are in §6 below. Break none of them without a decisi
 | P05 | Fast write (L1) | same-day parametric memory | P03, P04 | P2 |
 | P06 | Consolidation (L2) | stable long-term slabs without forgetting | P03, P04, P10 | P3 |
 | P07 | Compaction (L3) | bounded slab count | P06 | P4 |
-| P08 | Forgetting | exact unlearning, fact updates, suppression | P06 | P4 |
+| P08 | Forgetting | forget by rebuild with stated guarantees, fact updates, suppression | P06 | P4 |
 | P09 | Exec tools | reliable tool calls under continual learning | P03, P04 | P4 |
 | P10 | Safety | no alignment drift from continual updates | P03 | P3 |
 | P11 | Evaluation | measured evidence, kill criterion | P01 | P0+ |
 | P12 | Extensions | experiments and optional features | varies | P1–P5 |
+| P13 | Public benchmarks | comparison with published methods, other model families | P02, P03, P06, P08, P11 | P1, P3, P5 |
 
 ```
 P01 ──┬──> P03 ──┬──> P05 ──┐
       │          ├──> P10 ──┼──> P06 ──┬──> P07
 P02 ──┴──> P04 ──┘          │          └──> P08
             └───────────────┴──> P09
-P11 runs alongside every phase.
+P11 runs alongside every phase. P13 draws on P02, P03, P06, P08 and P11 in phases P1, P3, P5.
 ```
 
 ---
@@ -157,7 +161,9 @@ P11 runs alongside every phase.
 | `target` | 48–80 GB VRAM | 14B bf16 or 32B 4-bit | PRD target |
 
 The architecture is identical across profiles. The PRD's 14B+ target does not run on the `dev`
-machine. Known environment problem: the repo `.venv` fails on `import torch`
+machine. The intended deployment is a GPU with enough memory and a base of roughly 8B to 32B
+parameters or more, from Qwen, DeepSeek or another supported family (`P13` §2); the `dev`
+laptop is for development only (D-42). Known environment problem: the repo `.venv` fails on `import torch`
 (`No module named '_ctypes'`); task T0.1 rebuilds it.
 
 ---

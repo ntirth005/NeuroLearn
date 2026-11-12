@@ -73,12 +73,17 @@ For each open slab that received entries:
    slab's own earlier samples only (P03 §6.3).
 3. **Train.** Shadow = copy of the slab's committed tensors (or a fresh initialisation).
    `train_slab(...)` (P03 §7).
-4. **Test** (§5). On pass: `ledger.link(slab, entries)`, recompute centroid, store probe scores
-   with `at_commit=True` for new probes, mark the shadow pending.
+4. **Test** (§5). On pass: mark the shadow pending with its plan: `ledger.link(slab, entries,
+   role='primary')`, the recomputed centroid and routing centroids, and probe scores with
+   `at_commit=True` for new probes. The plan is written to the ledger when the commit is applied
+   at the safe point (P04 §6.1), so an entry is never recorded as consolidated in a slab version
+   that did not go live.
 5. **Retry.** On failure: one retry from the same starting tensors with `lr_slab / 2` and the
    anchor weight doubled. If that retry fails **only** the retention test, one further retry adds
    the samples of the `consolidate.neighbours` nearest slabs to `replay` and records their
-   entries in `slab_sources` with `role='replay'` at commit. On final failure: discard the shadow, set the entries' status to
+   entries in `slab_sources` with `role='replay'` at commit (`ledger.link(..., role='replay')`).
+   Those entries keep their one primary owner; this slab becomes a replay dependency of theirs
+   (P01 L-6). On final failure: discard the shadow, set the entries' status to
    `pending`, log `slab_commit_failed` with every measured value. Pending entries are served by
    recall and are retried next cycle.
 6. **Seal.** If `real_tokens ≥ consolidate.slab_capacity_tokens` after the commit, set
@@ -102,7 +107,7 @@ off. All six must pass.
 | 2 | Retention | Mean retention ratio over (a) the slab's own older probes and (b) the probes of its `neighbours` nearest slabs. The minimum ratio is reported too. | ≥ `consolidate.min_retention` |
 | 3 | Anchor KL | Mean per-token `KL(p_base ‖ p_model)` over the anchor file's `eval` split. | ≤ `consolidate.max_anchor_kl` |
 | 4 | Gate leak | Mean gate `w` of the shadow over anchor `eval` tokens, averaged over modules. | ≤ `consolidate.max_gate_leak` |
-| 5 | Refusal agreement | P10 §4. | ≥ `consolidate.min_refusal_agreement` |
+| 5 | Safety | P10 §4: refusal preservation, benign preservation and leakage, each measured and each gating. | ≥ `consolidate.min_refusal_agreement`; ≥ `safety.min_benign_agreement`; ≤ `safety.max_leak_rate` |
 | 6 | Greedy rollout | `rollout_check` (P03 §5) on `consolidate.rollout_probes` probes with `rollout_ok`, half new and half from the slab's older and neighbours' probes; plus 4 anchor `eval` prompts compared with the base's own greedy output for degeneration only. | match rate ≥ `consolidate.min_rollout_match`; **zero** degenerate outputs |
 
 If fewer than two probes with `rollout_ok` exist for the new entries, test 6 uses the older and
@@ -155,7 +160,7 @@ Logged as `consolidate_done`.
 | I-P06-1 | Assignment is deterministic given the ledger state and config. | unit |
 | I-P06-2 | A sealed slab's file hash is unchanged by any number of consolidation cycles. | tiny |
 | I-P06-3 | A slab whose commit tests fail leaves the live model and its file unchanged, and its entries become `pending`. | tiny |
-| I-P06-4 | After a cycle, every consolidated entry is in exactly one level ≥ 2 slab's `slab_sources`. | unit |
+| I-P06-4 | After a cycle, every consolidated entry has exactly one `primary` row among non-retired level ≥ 2 slabs. It may have any number of `replay` rows in other slabs, each created by the replay retry and each matching a batch that contained its samples (I-P08-8). | unit |
 | I-P06-5 | `score_at_commit` of an existing probe never changes. | unit |
 | I-P06-6 | The stored centroid equals the normalised mean of the source entry embeddings. | unit |
 | I-P06-7 | The cycle's domain-slab commits and the zero fast slab go live at the same safe point. | tiny |

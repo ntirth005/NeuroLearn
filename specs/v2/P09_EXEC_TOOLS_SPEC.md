@@ -106,8 +106,26 @@ When `exec.grammar` is true and the request carries tools:
 3. The constraint ends at the closing of the call.
 
 Supported JSON Schema subset: `object` (with `properties`, `required`, `additionalProperties:
-false`), `string`, `integer`, `number`, `boolean`, `null`, `enum`, `array` (with `items`). Schemas
-outside the subset fall back to plain JSON-object validity and log a warning.
+false`), `string`, `integer`, `number`, `boolean`, `null`, `enum`, `array` (with `items`).
+
+**Constraint level.** The guarantee differs by schema, so it is recorded per tool and never
+stated as one blanket promise. `ToolRegistry.register` classifies each tool:
+
+| Level | When | What decoding guarantees |
+|---|---|---|
+| `schema` | every keyword of the tool's schema is in the subset | the call parses, names an offered tool, and its arguments satisfy the schema |
+| `json` | the schema uses anything else (`pattern`, `format`, `oneOf`/`anyOf`, `$ref`, numeric or length bounds, nested `additionalProperties`, ...) | the call parses and names an offered tool; argument names and types are constrained as far as the subset part of the schema goes; the rest is **not** guaranteed by decoding |
+
+For a `json`-level tool the call is checked after decoding by `validate_tool_call`, extended
+with the unsupported keywords it can evaluate on a finished value. If the check fails, the call
+is re-decoded up to `exec.max_repair_attempts` times with the validation errors added to the
+prompt; if it still fails, the engine returns a tool-call error to the caller. **An invalid call
+is never executed and never becomes a trace.** Keywords the validator cannot evaluate are listed
+in the registration result, so the operator knows exactly which constraints are unchecked.
+
+The level of every offered tool is returned at registration, shown by `status`, and logged with
+each call. The synthetic tools of P11 are all `schema`-level; gate G-12's 100% parse rate is a
+statement about `schema`-level tools.
 
 Implementation: a character-level automaton over the schema, mapped to tokens by checking each
 candidate token's string against the automaton (with a per-state cache). An existing library may
@@ -137,6 +155,7 @@ separately.
 | I-P09-3 | A trace that fails validation or execution is never in a training batch. | unit |
 | I-P09-4 | `exec` slabs are loaded if and only if the request carries tools. | tiny |
 | I-P09-5 | Validator: missing required parameter, unknown parameter and wrong type are each detected. | unit |
+| I-P09-6 | A tool whose schema uses a keyword outside the subset is registered at level `json`, the unchecked keywords are listed, and a decoded call that violates a checkable keyword is repaired or returned as an error, never executed. | tiny |
 
 **Gate (slow, P11 stream):** on the synthetic tool tasks, tool-name accuracy and argument accuracy
 after N knowledge-consolidation cycles are not lower than at cycle 0 beyond run-to-run variation,

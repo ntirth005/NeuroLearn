@@ -49,6 +49,12 @@ Expected suffixes are `q_proj`, `v_proj` for the Qwen, Llama, Mistral, Gemma and
 families in `transformers`; verify by listing module names of each model when it is first added.
 Adding a family = one `Family` entry plus the T1.9 test passing.
 
+Deployment candidates named by the owner (D-42) are Qwen, DeepSeek and others at 8B to 32B or
+more. As recalled and not checked: DeepSeek's distilled R1 models are published on Qwen and
+Llama architectures and would fall under those families, while DeepSeek-V2/V3 use a latent
+attention design (MLA) that may not expose separate query and value projections and so may fail
+requirement 2 of §2.1. List the module names of any candidate before planning around it.
+
 ### 2.3 Family test (T1.9)
 
 For each family, on its smallest available instruct model, run the P02 invariants I-P02-1,
@@ -68,9 +74,22 @@ two other families. On the `dev` machine use sub-1B models.
 | B-5 | C-8, C-10 | A long-term conversational memory benchmark with temporal and knowledge-update questions (e.g. LongMemEval or LoCoMo) | Sessions replayed through `Engine.chat`, then the benchmark's questions | RAG-only (baseline `a`), full-context where it fits |
 | B-6 | C-9 | B-1 repeated on a second and third model family | As B-1 | Same baselines on that family |
 
-Baselines must be run under the same base model, rank budget and data order. Where a baseline has
-no usable implementation, implement it from its paper and say so in the report. Published numbers
-may be quoted only beside a statement of how the protocol differs.
+**Baselines are reproduced, not quoted (D-40).** Every comparison that supports a claim uses
+baselines run by this project under the same base model, rank budget, data order, step budget
+and replay policy (§4). Where a baseline has no usable implementation, implement it from its
+paper and say so in the report. Published numbers are never the comparison. They may appear
+beside a result only as context, with a statement of how the protocol differs in base model,
+task order, training budget, replay and evaluation.
+
+**Protocol verification comes first.** Before any number from a benchmark is logged in `06` §5:
+
+1. §6 is filled in for that benchmark (dataset source and version, splits, prompt format, metric
+   script, baseline implementations and commits).
+2. At least one baseline is reproduced **in the paper's own setting** (its base model and
+   protocol, or the closest this hardware allows) and compared with its published figure. The
+   difference is recorded in §6. A reproduction far from the published figure means the
+   protocol is not yet understood; resolve it or state it beside every result.
+3. The metric script is checked on a hand-computed example.
 
 Adapting classification to this system: each training example is an entry whose derived `qa`
 sample is the instruction with the label as answer (`teacher.mode: oracle`, since labels are
@@ -85,7 +104,11 @@ gold). The real-token rule and commit tests apply unchanged.
 - Same number of gradient steps per task, or report steps beside each number.
 - Replay is part of this method; report results with and without replay so that replay-free
   baselines are compared like for like.
-- Three seeds and three task orders where the benchmark defines them.
+- Three seeds and three task orders where the benchmark defines them. Results are reported per
+  seed and per order, not only averaged.
+- Intervals follow P11 §5.1. The resampling unit is the test example, or the group where the
+  benchmark groups examples (questions about one passage in B-3, one author in B-4, one
+  conversation in B-5).
 
 ---
 
@@ -93,6 +116,7 @@ gold). The real-token rule and commit tests apply unchanged.
 
 | Gate | Requirement | Phase |
 |---|---|---|
+| B-0 | Protocol verified for the benchmark (§3: §6 filled, one baseline reproduced against its published figure, metric script checked). Required before any other gate of that benchmark counts | P3, P5 |
 | B-1 | Final average accuracy not below the best baseline (interval of the difference includes or exceeds zero); backward transfer reported | P3 |
 | B-2 | Same on the long sequence | P5 |
 | B-3 | Recall-off accuracy above fine-tune-on-passage; recall-on accuracy not below RAG | P5 |
@@ -125,3 +149,4 @@ format, metric script, baseline implementations and commits.
 | I-P13-2 | For every supported family, wrapped modules exist in every layer and I-P02-1 holds. | tiny |
 | I-P13-3 | No test example of any benchmark appears in the ledger or derived rows. | unit |
 | I-P13-4 | All methods in a comparison receive the same examples in the same order. | unit |
+| I-P13-5 | The results logger refuses a benchmark result whose §6 protocol record or baseline-reproduction entry is missing. | unit |

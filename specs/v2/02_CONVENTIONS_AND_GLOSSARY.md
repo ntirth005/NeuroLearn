@@ -22,7 +22,12 @@
 | **Retention ratio** | A probe's current score divided by its score when its slab was committed. |
 | **Slab** | A low-rank update `ΔW = B A` for every adapted module, plus a gate offset `φ` per module. |
 | **Canonical form** | A slab whose `A` has orthonormal rows. All committed slabs are canonical. |
-| **Gate** | The per-token weight `w ∈ [0,1]` a slab's update is multiplied by. |
+| **Gate** | The function that maps a token and one slab to a weight. |
+| **Gate weight `w`** | The gate's output in `[0,1]`. Depends only on the token and that slab, never on other slabs. |
+| **Applied weight `ŵ`** | What the slab's update is actually multiplied by: `w` if the slab survives the top-k cap on that token, else 0. Equal to `w` whenever at most `k` slabs are open. The only quantity that can depend on other loaded slabs. |
+| **Cap-binding rate** | Share of tokens on which the cap set some open slab's `ŵ` to 0. |
+| **Primary owner** | The one non-retired level ≥ 2 slab that lists an entry with `role='primary'`. |
+| **Canary** | A short distinctive substring of an entry (at most 32 bytes) used to byte-search files after a forget. |
 | **Slot** | One of `slabs.slots` preallocated positions in each adapted module that a slab is loaded into. |
 | **Hot / warm / cold** | Slab tier: in a slot / tensors in RAM / file on disk only. |
 | **Open / sealed** | Slab state: still accepting training / frozen permanently. |
@@ -68,9 +73,12 @@ neurolearn/
     registry.py  validator.py  grammar.py
   safety/                       # P10
     probes.py  gate.py
+  models/                       # P13
+    families.py
   eval/                         # P11
-    synthetic_user.py  baselines.py  metrics.py  run.py  report.py
+    synthetic_user.py  baselines.py  metrics.py  run.py  report.py  feasibility.py
     experiments/                # one script per experiment in P12 §2
+    public/                     # P13 benchmarks and reproduced baselines
 tests/
   unit/  integration/  fixtures/
 configs/
@@ -78,6 +86,7 @@ configs/
 data/                           # runtime data, git-ignored (layout in P01 §2)
 specs/v2/                       # this folder
   reference/verify_slab_math.py # NumPy check of the slab algebra (05 §3.1); ported to tests in T1.2
+  reference/sqlite_*.py         # SQLite contention and forget-residue checks (05 §3.4–3.5); ported in T0.3
 ```
 
 A file is owned by the pillar shown. Do not add modules outside this layout without updating it here.
@@ -139,5 +148,7 @@ python -m neurolearn.eval.run        --config ... --stream <seed> --cycles N --s
 - Never train on assistant output, on probes, or on a derived sample that cites a derived sample.
 - Never lower a gate threshold to make a failing test pass.
 - Never commit a slab from the worker thread.
-- Never delete a ledger row. Forgetting wipes content and leaves a tombstone (P08).
+- Never delete an `entries` row. Forgetting wipes content and leaves a tombstone (P08).
+- Never put entry text, derived text or a forget query into an event payload or a log line.
+- Never call forgetting "exact unlearning" or the refusal-agreement figure a "safety rate" (D-35, D-39).
 - Never report a number that was not produced by a run in this repository.

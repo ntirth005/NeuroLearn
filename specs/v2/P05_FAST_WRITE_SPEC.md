@@ -51,7 +51,10 @@ entry, P08's rebuild job is queued ahead of this write.
 2. `drafts = derive(base, [entry], neighbours, write.derived_per_entry)` (P03 §3).
 3. `accepted = apply_filters(drafts)`; `train, probes = select_probes(accepted)`.
    Store all with `ledger.add_derived`. If no trainable sample survives, stop (`l1_write_skipped`).
-4. Create a shadow copy of the fast slab's current committed tensors.
+4. Create a shadow copy of the fast slab: of its **pending** version if one is waiting for a
+   safe point, otherwise of its committed tensors. Starting from the committed version while a
+   pending one exists would drop the earlier write when the new shadow replaces it (P04 §6.1);
+   in a long session with no safe point only the last write would survive.
 5. **Decay once:** `θ ← (1 − write.fast_decay) · θ` for the shadow's `A`, `B`.
 6. **Update** for `write.fast_steps` steps. Each step's batch (P03 §6.6 proportions) is drawn from:
    this turn's samples and raw entry, the **ring buffer** (the last `write.ring_size` fast-slab
@@ -72,10 +75,11 @@ entry, P08's rebuild job is queued ahead of this write.
 8. If the norm cap rescaled anything, scale the matching momentum by the same factor. (The slab is
    already canonical from the per-step retraction.)
 9. **Light commit tests** (same definitions as P06 §5, on reduced samples): anchor KL, gate leak,
-   refusal agreement. New-probe pass rate is measured and logged but does not gate an L1 write.
+   and the three safety measures of P10 §4. New-probe pass rate is measured and logged but does not gate an L1 write.
    On failure discard the shadow and log `slab_commit_failed`.
-10. Mark the shadow pending (P04 §6). Add the turn's samples to the ring buffer. Add the entry to
-    `slab_sources` of the fast slab. Log `l1_write_done` with the measured values.
+10. Mark the shadow pending (P04 §6), carrying the entry id with it. Add the turn's samples to
+    the ring buffer. Log `l1_write_done` with the measured values. The entry is added to
+    `slab_sources` of the fast slab when the commit is applied (P04 §6.1), not before.
 
 Step 6 calls `should_yield()` before every step and before every teacher call.
 

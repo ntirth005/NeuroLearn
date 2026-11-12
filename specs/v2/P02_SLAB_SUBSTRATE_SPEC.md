@@ -52,6 +52,15 @@ update = B_m A_m z
 - `slabs.input_norm: none` disables this (`z = x`) for the E-GATE comparison.
 - Standardisation removes per-dimension scale and the mean. It does not remove correlations
   between dimensions; `φ` is learned and the keyed gate (§4.4) remains the fallback.
+- **Deflation (experimental, off by default; `slabs.gate_deflate_rank = p`).** Correlated
+  dimensions show up as a few directions of `z` that carry much of the variance on all text.
+  With `p > 0` the stats file also stores `U_m ∈ R^{p×d_in}`, the top-`p` principal directions
+  of `z` on the anchor `train` split (orthonormal rows, fixed like `μ, σ`). Every slab's `A_m`
+  is kept orthogonal to `U_m` (projected at initialisation and inside `retract`), so slabs
+  neither read nor gate on those directions, and the gate's energy share becomes
+  `e = ‖A z‖² / (‖z‖² − ‖U_m z‖²)`. Cost: one `p×d_in` product per module, shared by all slots.
+  This is a rank-`p` stand-in for whitening; the full `d×d` transform stays not adopted (D-22).
+  E-GATE compares `p = 0` and `p = 8`.
 
 ```python
 @dataclass
@@ -115,6 +124,9 @@ inference-time cut-off, so there is no train/inference mismatch and no jump at t
 - **Constraint `τ ≤ 1`.** For small `e`, `s ≈ (e·d_in/r)^{1/τ}·e^{−φ/τ}`, so `ds/de ∝ e^{1/τ−1}`,
   which stays bounded as `e → 0` only when `τ ≤ 1`. Config validation rejects `τ > 1`.
 - Each slab's `w` depends only on `x` and that slab. There is no normalisation across slabs.
+  `w` is the **gate weight**. What multiplies the update is the **applied weight** `ŵ` of §4.2,
+  which equals `w` unless the cap binds (D-34). Statements about independence in these specs
+  are about `w`; statements about what a slab contributes are about `ŵ`.
 - Clamp `e` below at `1e-12` before the log.
 
 ### 4.2 Top-k cap and cut-off
@@ -122,7 +134,8 @@ inference-time cut-off, so there is no train/inference mismatch and no jump at t
 The ramp above is the gate. The cap is only a safety bound on how many slabs may add to one token.
 
 If more than `slabs.top_k` gated slabs have `w > 0` on a token, keep the `k` with the largest
-**calibrated margin** and set `w = 0` for the rest:
+**calibrated margin** and set the applied weight `ŵ = 0` for the rest; for the kept slabs
+`ŵ = w`, unchanged:
 
 ```
 m̃_b = (m_b − mean_b) / std_b
@@ -133,10 +146,21 @@ They are frozen, not running statistics. Raw margins are not comparable between 
 separately (D-28); `m̃` asks "how typical is this token of each slab's own domain".
 
 - No gradient flows through the selection. `ungated` slabs always have `w = 1` and do not count.
-- The cap is the one place where a slab's output can depend on other loaded slabs. It should
-  rarely bind. `SlabLinear` counts the share of tokens on which it binds (**cap-binding rate**),
-  reported per turn and in every commit report. A sustained rate above a few percent means slabs
-  overlap; those slabs are compaction candidates (P07 §4), and the rate is a P11 metric.
+- The cap is the one place where a slab's output can depend on other loaded slabs: when it
+  binds, slabs compete, and which ones are applied depends on the hot set. It should rarely
+  bind. `SlabLinear` counts the share of tokens on which it binds (**cap-binding rate**) and,
+  per slab, how often that slab was open but dropped (**drop rate**); both are reported per
+  turn and in every commit report, and the rate is a P11 metric.
+- **The shadow and the cap.** While a slab trains it has no `m_ref` yet. The shadow counts as
+  one group toward `k` and is always kept; committed slabs compete for the remaining places.
+  `m_ref` is measured after the last step (P03 §7), and commit tests then run with the shadow
+  ranked by calibrated margin like any other slab, so what is tested is what will be served
+  (I-P02-18).
+- **Acceptance.** E-GATE measures the cap under normal load and under forced overload
+  (P12 §2). A cap-binding rate above `slabs.max_cap_binding` under normal load, or a loss of
+  probe recall under overload, means the competition is not acceptable as designed and the
+  selection strategy is revisited (D-34). In operation, slabs that keep dropping each other are
+  compaction candidates (P07 §4): concatenating them under one gate removes the competition.
 
 ### 4.3 Gate while training
 
@@ -169,7 +193,9 @@ def retract(A, B, state):                    # after each optimiser step, per mo
 
 ```python
 class Gate(Protocol):
-    def margin(self, u: Tensor, x_sq: Tensor, phi: Tensor, d_in: int, r: int) -> Tensor: ...
+    def margin_from_energy(self, e_grp: Tensor, x_sq: Tensor, phi: Tensor, d_in: int, r_grp: Tensor) -> Tensor:
+        """e_grp: summed squared activations per gate group; x_sq: squared norm of the input
+           (less the deflated part when gate_deflate_rank > 0). Returns the margin m of §4.1."""
 ```
 
 ---
@@ -204,13 +230,14 @@ def forward(self, x):                                   # x: (..., d_in)
     e_blk = u.unflatten(-1, (S, r)).pow(2).sum(-1)      # (..., S)
     e_grp = scatter_sum(e_blk, self.group)              # energy per gate group
     m = self.gate.margin_from_energy(e_grp, x_sq, self.phi_grp, d_in, rank_of_group)
-    w = ramp_and_cap(m, k, delta, self.m_ref_grp, self.ungated_grp, self.occupied_grp)   # §4.1–4.2, same in train and inference
-    w_blk = w.gather(-1, self.group)                    # back to per-slot
+    w = ramp(m, delta, self.ungated_grp, self.occupied_grp)             # gate weight, §4.1: independent per slab
+    w_hat = cap(w, m, k, self.m_ref_grp, self.ungated_grp)              # applied weight, §4.2; same in train and inference
+    w_blk = w_hat.gather(-1, self.group)                # back to per-slot
     if ctx.exclude_slots: w_blk[..., ctx.exclude_slots] = 0
     y = y + ((u.unflatten(-1, (S, r)) * w_blk.unsqueeze(-1)).flatten(-2) @ self.B_hot.T).to(y.dtype)   # GEMM 2
     if ctx.shadow is not None:                          # worker thread only
-        y = y + ctx.shadow.delta(self.path, xs, x_sq).to(y.dtype)       # §4.3 gate, trainable tensors
-    if ctx.collect: ctx.stats.add(self.slab_id, w_blk)
+        y = y + ctx.shadow.delta(self.path, xs, x_sq).to(y.dtype)       # trainable tensors; takes part in the cap as §4.2 says
+    if ctx.collect: ctx.stats.add(self.slab_id, w_gate=w, w_applied=w_blk)   # both, so cap effects are visible
     return y
 ```
 
@@ -298,7 +325,8 @@ The result equals the best rank-`r_out` approximation of `ΔW_1 + ΔW_2`. It is 
 ## 8. File format (`io.py`)
 
 One safetensors file per slab version: `slabs/<namespace>/<id>.safetensors`, tensors named
-`<module_path>.A`, `<module_path>.B`, `<module_path>.phi`, stored in the slab dtype of the profile
+`<module_path>.A`, `<module_path>.B`, `<module_path>.phi`, `<module_path>.m_ref` (mean and
+standard deviation of the own-domain margin, §4.2), stored in the slab dtype of the profile
 (`bfloat16` on GPU, `float32` on `dev`). Header metadata: `slab_id`, `version`, `rank`,
 `base_model_id`, `stats_id`. Written atomically. Everything else lives in the ledger.
 
@@ -329,18 +357,20 @@ overhead is a P11 metric.
 | I-P02-2 | `canonicalise` preserves `B A` (max abs error < 1e-5 in fp32) and yields `A Aᵀ = I`. | unit |
 | I-P02-3 | The stacked forward equals the sum of per-slab updates computed one at a time. | unit |
 | I-P02-4 | Gate energy is ≈ `r/d_in` for random `x` and 1 for `x` in the row space. | unit |
-| I-P02-5 | A slab's contribution for a given `x` is identical regardless of which other slabs are loaded, as long as fewer than `k` gated slabs have positive margin. | unit |
+| I-P02-5 | A slab's gate weight `w` for a given `x` is identical regardless of which other slabs are loaded, always. Its applied weight `ŵ` and contribution are identical regardless of which other slabs are loaded as long as at most `k` gated slabs are open on the token. | unit |
 | I-P02-6 | `retract` leaves `B A` unchanged, restores `A Aᵀ = I`, and transforms first-moment buffers so that one further momentum-only step gives the same `ΔW` change as without the retraction (to first order). | unit |
 | I-P02-13 | Gradients of the gate with respect to `A` and `φ` are finite for `e` from `1e-12` to 1, in float32 and bfloat16, for every allowed `τ`. | unit |
 | I-P02-14 | For the same inputs and slabs, gate weights are identical with `ctx.train` true and false. | unit |
 | I-P02-15 | A freshly initialised slab (`B = 0`, `φ = phi_init`) receives a non-zero gradient on `B` from its first batch. | tiny |
 | I-P02-16 | When more than `k` slabs are open on a token, selection follows calibrated margin; with `k` or fewer open, the cap changes nothing. | unit |
+| I-P02-17 | Under the cap every slab's `ŵ` is either its own `w` or 0 (no rescaling); collected statistics report `w` and `ŵ` separately, and the cap-binding and per-slab drop rates computed from them match a direct count. | unit |
+| I-P02-18 | With a trained shadow live in commit-test mode, model outputs equal the outputs after that shadow is committed into a slot, including on tokens where more than `k` slabs are open. | tiny |
 | I-P02-7 | `pack` equals the truncated SVD of the dense sum; is exact when effective ranks fit; returns canonical factors. | unit |
 | I-P02-8 | Save then load reproduces tensors bit for bit. | unit |
 | I-P02-9 | No base parameter has `requires_grad=True` or changes value after any slab operation. | tiny |
 | I-P02-10 | A rank-`2r` slab in two grouped slots produces the same output as the same slab applied as a single rank-`2r` update. | unit |
 | I-P02-11 | Input statistics are loaded once, are identical for every slab of a module, and never change after install; each slab file records the `stats_id` it was trained with and refuses to load under another. | tiny |
-| I-P02-12 | On anchor `eval` text, the mean gate energy of a random canonical slab is within a factor of 3 of `r/d_in` with `input_norm: standardize`; the same figure with `none` is reported beside it. | slow |
+| I-P02-12 | On anchor `eval` text, the mean gate energy of a random canonical slab is within a factor of 3 of `r/d_in` with `input_norm: standardize`; the same figure with `none` is reported beside it, together with the share of the variance of `z` held by its top 8 principal directions (the correlation standardisation leaves in). | slow |
 
 **Phase gate (T1.8, experiment E-GATE):** defined in `P12_EXTENSIONS_SPEC.md` §2. It decides
 `slabs.gate` and is recorded as an update to D-04.

@@ -86,27 +86,61 @@ One connection held a write transaction inserting 20,000 rows into a table and i
 
 Readers are not blocked; writers are. Basis for D-33.
 
+### 3.5 Forget residue in SQLite (`reference/sqlite_forget_residue.py`, SQLite 3.45.1, Python 3.12.3)
+
+Run 2026-11-12. One entry with two canary strings among 600 filler entries, in `entries`,
+`chunks`, an external-content FTS5 index and `derived`. The logical wipe of `P01` §4.5 was
+applied, then each maintenance step, with a byte search of the `.db`, `-wal` and `-shm` files
+after each. "Files" lists where a canary was still found.
+
+| Settings | After wipe | Checkpoint while a reader holds a snapshot | After `wal_checkpoint(TRUNCATE)` | After FTS5 `optimize` | After `VACUUM` |
+|---|---|---|---|---|---|
+| `secure_delete` off, entry still in WAL | wal | busy; db, wal | db | db | clean |
+| `secure_delete` off, entry checkpointed | db, wal | busy; db, wal | db | db | clean |
+| `secure_delete` on only | db, wal | busy; db, wal | db | clean | clean |
+| `secure_delete` on + FTS5 `secure-delete` | db | busy; clean | clean | clean | clean |
+| same, entry still in WAL | wal | busy; wal | clean | clean | clean |
+
+- The logical wipe alone never removed the bytes. The FTS query for the canary returned nothing
+  in every case, so a query-level test would have passed.
+- `secure_delete` alone left the canary's terms in the FTS5 index until `optimize`.
+- A truncating checkpoint returned busy while another connection held a read snapshot.
+- This build's default is `secure_delete = 1`; the spec sets it explicitly and does not rely on that.
+- Not covered: the storage medium below the file system, and long values split across overflow
+  pages (the canaries were short on purpose). Basis for D-38.
+
 ---
 
 ## 4. What is not verified
 
-In order of risk to the design:
+Roughly in order of risk to the design:
 
-0. **Activation anisotropy of Qwen 2.5 projection inputs.** The literature reports strong
+1. **Activation anisotropy of Qwen 2.5 projection inputs.** The literature reports strong
    anisotropy and a few dominant ("rogue") dimensions in transformer hidden states; this is
    recalled, not re-read, and not measured on this model. I-P02-12 measures it. §3.1's gate-energy
    check used isotropic random inputs and does not cover this.
-0b. **Position-shift invariance of the base model** (assumed in `P03` §6.1 from rotary position
+2. **Gate selectivity** of a trained rank-8 slab under independent gating (E-GATE), and how
+   often the top-k cap binds when slabs overlap (E-GATE overload condition).
+3. **Whether slabs add value over recall** on the categories they are meant for (G-K).
+4. **CPU feasibility of the run sizes.** No throughput, step time or memory figure has been
+   measured on the `dev` machine; the 10-, 50- and 200-cycle runs of `P11` §8 are untimed
+   (T0.8, G-0).
+5. **Position-shift invariance of the base model** (assumed in `P03` §6.1 from rotary position
    encoding; I-P03-10 measures it). **Open-start gate initialisation** (D-30) and **calibrated
    cap ranking** (D-28) are untested design choices.
-1. **Gate selectivity** of a trained rank-8 slab under independent gating (E-GATE).
-2. **Whether slabs add value over recall** on any category (G-K).
-3. **Teacher quality** of a 0.5B model for derived samples (reason for the oracle mode).
-4. **Supersession detection** accuracy with a small base.
-5. **Independent gates under load:** many moderately open gates summing (watched by gate-leak and anchor-KL tests).
-6. **Routing over thousands of centroids**, and **slot changes under a live KV cache** (E-STALE).
-7. **Weight cosine between trained slabs** (E-COS); §3.1 covers random slabs only.
-8. **The FLOP overhead estimate** (about 3% per layer on 14B at 64 slots) against measured throughput (G-13).
-9. **Paper details** marked (summary) in §2.
-10. **The encoder model id** in `03` (`BAAI/bge-small-en-v1.5`, 384 dimensions) is from memory; confirm at T0.4.
-11. **The Qwen 2.5 tool-call output format** (`P09` §2); confirm against the tokenizer at T4.8.
+6. **Teacher quality** of a 0.5B model for derived samples (reason for the oracle mode), and of
+   any deployment-size base (first measured at T5.2).
+7. **The leakage flag of `P10` §4** (base likelihood of the candidate's reply) is a design
+   choice; whether its gap separates refuse-then-comply replies from harmless rewordings at the
+   starting threshold is untested (I-P10-6, human audit).
+8. **Supersession detection** accuracy with a small base.
+9. **Independent gates under load:** many moderately open gates summing (watched by gate-leak and anchor-KL tests).
+10. **Routing over thousands of centroids**, and **slot changes under a live KV cache** (E-STALE).
+11. **Weight cosine between trained slabs** (E-COS); §3.1 covers random slabs only.
+12. **The FLOP overhead estimate** (about 3% per layer on 14B at 64 slots) against measured throughput (G-13).
+13. **Paper details** marked (summary) in §2.
+14. **The encoder model id** in `03` (`BAAI/bge-small-en-v1.5`, 384 dimensions) is from memory; confirm at T0.4.
+15. **The Qwen 2.5 tool-call output format** (`P09` §2); confirm against the tokenizer at T4.8.
+16. **Module layouts of other families**, DeepSeek in particular (`P13` §2.2), are from memory;
+    list module names before planning around a model.
+17. **Media-level erasure** is not tested and not claimed (§3.5, D-38).

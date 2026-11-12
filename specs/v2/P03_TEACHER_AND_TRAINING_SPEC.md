@@ -98,6 +98,14 @@ cloze rows act as its probes), and the rate is logged. Filter 2 is disabled by s
 gates; setting them per profile is allowed, but every report states the settings and the
 measured acceptance rate.
 
+**Limit of the fallback (D-25, D-42).** Rule-based cloze teaches spans that occur literally in an
+entry: values, names, paths. It cannot produce an implication, a paraphrased question or a
+sample joining two entries, so a slab trained on cloze alone is not expected to gain on `multi`
+or on reworded questions. On `dev`, learning of that kind is evaluated in `oracle` mode only;
+with the model teacher it is evaluated on the GPU profile with a capable base (T5.2, T5.5).
+Every report states the share of training samples by kind and by origin (teacher, rule, oracle)
+so that a result cannot be read as semantic learning when it came from cloze.
+
 ---
 
 ## 5. Probes (`probes.py`)

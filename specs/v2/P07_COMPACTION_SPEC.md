@@ -1,6 +1,6 @@
 # P07 — Compaction (L3)
 
-**Solves:** keeping the number of slabs, and the memory they need, bounded over years.
+**Solves:** keeping the slabs held in memory and the number of routing units bounded over years. It does not bound disk use (§9).
 **Phase:** P4 (T4.1–T4.4)
 **Depends on:** P02 (algebra), P03 (training, probes), P06 (commit tests, sealed slabs)
 **Provides to:** —
@@ -82,18 +82,22 @@ For a candidate pair with `r_eff(a) + r_eff(b) ≤ slabs.rank`:
 
 1. `B, A, kept = pack(a, b, rank)` per module (P02 §7.3). Require `kept ≥ 0.999` on every module;
    otherwise treat the pair as a rebuild-merge candidate.
-2. Create a new slab row: `level=3`, `parent_slab_ids=[a, b]`, sources = union, centroid from the
-   union, fresh seed.
+2. Create a new slab row: `level=3`, `parent_slab_ids=[a, b]`, sources = union with roles kept
+   (`primary` if primary in either parent, else `replay`), centroid from the union's primary
+   entries, fresh seed. The rows are inserted when the parents are retired (step 5), in one
+   transaction, so an entry never has two primary owners (P01 L-6).
 3. **Re-fit the gate.** The merged row space is the union of both, so `φ` must be re-learned.
    Train `φ` only (all `A`, `B` frozen) for a few hundred steps on the union of both slabs'
    samples with `L_distill + λ_anc·L_anchor`. Then re-measure `m_ref` (P02 §4.2) for the new
    slab and recompute its routing centroids (P06 §3).
 4. **Test** with the new slab as shadow and both parents excluded: retention over the union of
    both parents' probes (against their carried-over `score_at_commit`), anchor KL, gate leak,
-   refusal agreement.
-5. On pass: copy both parents' files to `slabs/_originals/<event_id>/`, mark parents `retired`,
-   carry over their `probe_scores` (with the original `score_at_commit`) to the new slab, mark
-   the new slab pending, log `pack`. On fail: discard; the pair stays as it was.
+   the safety measures (P10 §4).
+5. On pass: mark the new slab pending. When its commit is applied at the safe point, in one
+   transaction: copy both parents' files to `slabs/_originals/<event_id>/`, unload the parents
+   and mark them `retired`, insert the new slab's sources, carry over the parents'
+   `probe_scores` (with the original `score_at_commit`), log `pack`. Until then the parents keep
+   serving. On fail: discard; the pair stays as it was.
 
 ---
 
@@ -152,7 +156,18 @@ Slab count grows with novel input. Assuming 20k novel tokens a day and
 `slab_capacity_tokens = 50000`: about 150 slabs a year, under 2 GB a year on the 14B base before
 any compaction.
 
-What is and is not bounded:
+Two separate resource guarantees. They are never reported as one "bounded growth" figure.
+
+| Resource | Guarantee | Enforced by | Checked by |
+|---|---|---|---|
+| **Inference residency**: slabs in slots and in RAM, per-token compute | Bounded by configuration, whatever the age of the system | `slabs.slots`, `runtime.warm_slabs`, session pinning | G-9 |
+| **Archival storage**: slab files, ledger, originals on disk | **Not bounded.** Grows with the novel information stored | nothing; only prune and successful rebuild-merge reduce it | reported: bytes per 1,000 novel tokens, per cycle |
+
+`status` shows current disk use and the measured growth rate so that the operator can plan
+storage. Concatenation moves nothing between the two rows: it lowers the number of routing
+units and leaves parameters on disk unchanged.
+
+In detail:
 
 - **Bounded:** memory in use (`slabs.slots` hot, `runtime.warm_slabs` in RAM), and per-token
   compute. Neither depends on how many slabs exist on disk.
@@ -169,7 +184,7 @@ What is and is not bounded:
 | ID | Invariant | Tier |
 |---|---|---|
 | I-P07-1 | Prune and pack never change a module's `ΔW` by more than the stated tolerance (prune: energy `1 − prune_energy`; pack: `1 − kept`). | unit |
-| I-P07-2 | After pack or rebuild-merge, `slab_sources(new) = slab_sources(a) ∪ slab_sources(b)` and both parents are `retired`. | unit |
+| I-P07-2 | After pack, concatenate or rebuild-merge, `slab_sources(new) = slab_sources(a) ∪ slab_sources(b)` with roles kept, both parents are `retired`, and every entry still has exactly one primary owner among non-retired slabs. | unit |
 | I-P07-3 | `score_at_commit` values are carried over unchanged. | unit |
 | I-P07-4 | A failed test leaves files, rows and the live model unchanged. | tiny |
 | I-P07-5 | Revert restores the parents bit for bit. | tiny |

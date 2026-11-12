@@ -29,14 +29,18 @@ Generated from a seed. Everything is fictitious so the base cannot know it.
 
 | Object | Attributes |
 |---|---|
-| People (20) | invented name, role, team, a preference |
-| Projects (10) | invented name, owner (a person), deadline (date), status, a port number, a repository path |
+| People (30) | invented name, role, team, a preference |
+| Projects (30) | invented name, owner (a person), deadline (date), status, a port number, a repository path |
 | Jargon terms (30) | invented word with a one-sentence definition tied to a project |
 | Tools (5) | name, JSON schema, a deterministic fake implementation |
-| Style rules (3) | e.g. "sign off with '— N.'", "answer in at most two sentences" |
+| Style rules (10) | e.g. "sign off with '— N.'", "answer in at most two sentences" |
 
-A **fact** is one attribute of one object, with: three statement paraphrases, three question
-paraphrases, a gold short answer, and a category. Question paraphrase 1 is reserved for
+Sizes are chosen so that every category has enough independent clusters for §5.1 (a `multi`
+question is tied to one project, a `style` question to one rule), and enough facts for 200 cycles.
+
+A **fact** is one attribute of one object, with a stable `fact_id`, three statement paraphrases,
+three question paraphrases, a gold short answer, and a category. Every evaluation question
+records the `fact_id`s it depends on (one for most, two for `multi`); §5 uses them to cluster. Question paraphrase 1 is reserved for
 evaluation and is never shown to the system in any form; paraphrases 2–3 feed the oracle teacher.
 
 Categories: `fact` (exact values), `jargon`, `multi` (two-hop: "Which port does the project owned
@@ -52,7 +56,7 @@ by X use?"), `style`, `updated`, `forgotten`, `tool`.
 | `filler` | generic chat unrelated to the world |
 | `ingest_file` | a document containing ~10 facts |
 | `update_fact` | user states a new value for an earlier fact |
-| `forget_request` | user asks to forget an earlier fact |
+| `forget_request` | user asks to forget an earlier fact; a fixed share of these target a fact that was stated twice, in two entries with different wording, and name only one of them (P08 §3.3) |
 | `tool_task` | request that requires one of the tools |
 | `style_rule` | user states or repeats a style rule |
 
@@ -110,20 +114,40 @@ All use the same base, recall settings, derived samples and decode settings.
 | **Plasticity** | Recall-off accuracy on same-day facts after consolidation. |
 | **Retention** | Recall-off accuracy at lag L divided by recall-off accuracy at lag 0 for the same facts; and mean retention ratio of probes. |
 | **Stale-answer rate** | Share of `updated` questions answered with the old value. |
-| **Forget leakage** | Share of `forgotten` questions answered with the gold value; and the forgotten facts' probe score compared with the bare base's. |
+| **Forget: source removal** | Share of forgets whose byte search is clean (P08 §3.1). |
+| **Forget: behavioural removal** | Share of `forgotten` questions answered with the gold value, recall off and on, beside the bare base's share; and the forgotten facts' probe score minus the bare base's (P08 §3.3). Reported separately for facts stated once and facts stated twice. |
 | **Base preservation** | Anchor KL (P06 §5); accuracy on anchor questions vs the bare base. |
 | **Gate selectivity** | Mean gate on tokens of a slab's own probe prompts vs on anchor tokens. |
 | **Cap-binding rate** | Share of tokens on which the top-k cap removed an open slab (P02 §4.2). |
 | **Rollout health** | Share of greedy replies flagged degenerate (empty, no end-of-turn, repeated 4-grams), on probes and on anchor prompts. |
-| **Refusal agreement** | P10 §4, whole live model. |
+| **Refusal preservation, benign preservation, leakage** | P10 §4, whole live model, three separate figures, each also per prompt variant. Agreement with the base, not a safety rate. |
+| **Feasibility** | Tokens per second (prefill, decode), seconds per training step at `train.batch_tokens`, peak resident memory, disk bytes per entry and per slab; projected wall time per L1 write, per consolidation cycle and per required run (§8). |
 | **Tool metrics** | Parse rate, tool-name accuracy, argument accuracy (P09 §3). |
 | **Style adherence** | Rule-specific string check on replies to generic questions. |
 | **Overhead** | Tokens per second and first-token latency vs the bare base, at empty and full slots; with and without the worker training. |
 | **Cost** | Wall time and peak memory per write and per consolidation; slab count by state; disk use. |
 
-Uncertainty: run 3 seeds. For comparisons between systems use a paired bootstrap over questions
-and report the 95% interval of the difference. "Above baseline" in any gate means the interval
-excludes zero.
+### 5.1 Uncertainty (D-40)
+
+Questions are not independent observations. The same fact is asked at several lags, with recall
+off and on, and again inside two-hop questions; facts about one object arrive in one session.
+Resampling questions one by one would give intervals that are too narrow.
+
+- **Cluster.** Two questions are in the same cluster if they share a `fact_id`, directly or
+  through a chain of shared facts (so a `multi` question joins the clusters of both its facts).
+  Clusters are computed once per stream from `truth.json`.
+- **Paired cluster bootstrap.** For a comparison between two systems on one seed: resample
+  clusters with replacement (10,000 draws), take every question of each drawn cluster for both
+  systems, and compute the difference. Report its 95% interval.
+- **Seeds.** Run 3 seeds. Report the interval **for each seed separately** and the number of
+  clusters behind it. Three seeds are too few to resample; they are a replication check, not a
+  sample.
+- **"Above baseline"** in any gate means: the interval excludes zero on every seed.
+  **"Not worse"** means: on no seed does the interval lie wholly below zero. A gate that holds
+  on some seeds only is reported as mixed and does not pass.
+- Report the cluster count next to every interval. A category with fewer than 10 clusters in a
+  run is reported without a pass/fail and is left out of any "not worse on any category" guard,
+  with a note saying so.
 
 ---
 
@@ -133,6 +157,7 @@ Thresholds are starting values (`03_CONFIG_REFERENCE.md`); results are reported 
 
 | Gate | Metric and threshold | Phase |
 |---|---|---|
+| G-0 Feasibility | T0.8 measurements recorded; every required run of §8 has a projected wall time; each projection above `eval.run_budget_hours` has a decision (D-37) | P0 |
 | G-1 Baselines run | `a` and `b` produce a full report | P0 |
 | G-2 Slab learns | One slab, oracle mode: probe pass rate ≥ 0.6, anchor KL ≤ 0.02, gate leak ≤ 0.02 | P1 |
 | G-3 Gate selects | Own-domain gate ≥ 0.5, anchor gate ≤ 0.02 | P1 |
@@ -140,20 +165,41 @@ Thresholds are starting values (`03_CONFIG_REFERENCE.md`); results are reported 
 | G-5 Serving unaffected | Identical tokens with and without the worker (I-P04-4); first-token latency and tokens/s, worker idle vs busy, median and p95, reported | P2 |
 | G-6 Retention | Probe retention ≥ 0.90 at 50 cycles | P3 |
 | G-7 Plasticity | New-probe pass rate ≥ 0.6 each cycle and above `b` | P3 |
-| G-8 Base preserved | Anchor KL ≤ 0.02 and refusal agreement ≥ 0.98 at every cycle | P3 |
-| G-9 Bounded growth | Hot and warm memory within limits; non-archived routing units plateau over 200 cycles; disk use reported | P4 |
-| G-10 Forgetting | Forget leakage at base level; neighbours retain ≥ 0.95 | P4 |
+| G-8 Base preserved | Anchor KL ≤ 0.02, refusal preservation ≥ 0.98, benign preservation ≥ 0.95 and leakage ≤ 0.02 at every cycle, per variant; human audit at the final cycle (P10 §4.1) | P3 |
+| G-9 Bounded residency | Hot and warm memory within limits at every cycle; non-archived routing units plateau over 200 cycles. Archival storage is not gated: disk bytes per 1,000 novel tokens and its trend are reported (`P07` §9) | P4 |
+| G-10 Forgetting | Source removal: byte search clean for every forget. Behavioural removal: forgotten facts answered no more often than by the bare base and probe residual ≤ `forget.residual_margin`, recall off and on, for facts whose every stating entry was forgotten; facts with a surviving restatement reported separately. Neighbours retain ≥ 0.95 | P4 |
 | G-11 Updates | Updated-fact accuracy (recall on) above `a`; stale-answer rate reported | P4 |
 | G-12 Tools | Tool accuracy not below cycle 0; parse rate 100% with grammar | P4 |
 | G-13 Overhead | ≤ 15% slower than the bare base at full slots | P5 |
-| **G-K Kill criterion** | With recall on, `full` beats `a` on at least `jargon`, `style` and `multi` | P3 (oracle), P5 (model teacher) |
+| **G-K Kill criterion** | Primary metric: mean of the recall-on accuracies on `jargon`, `style` and `multi`. `full` is above `a` on it, and not worse than `a` on any single category (§5.1 definitions) | P3 (oracle), P5 (model teacher) |
 
 ### The kill criterion
 
 Parametric memory is extra machinery on top of baseline `a`. It has to pay for itself.
 
-- If `full` does not beat `a` on any category in P3 with the oracle teacher, stop building P4.
-  Ship `a`, keep slabs only for style and persona (`core`), and record the decision.
+One rule, fixed before any run (D-41):
+
+- **Primary metric:** the unweighted mean of three recall-on accuracies: `jargon`, `style`
+  (the rule's string check) and `multi` (normalised exact match). These are the categories the
+  design says slabs are for (D-07). The mean is unweighted so that no category counts for more
+  because it has more questions. `fact` is excluded: exact values are recall's job.
+- **Threshold:** the paired clustered-bootstrap 95% interval of `full − a` on that metric
+  excludes zero on every seed (§5.1; the metric is recomputed on each bootstrap draw).
+- **Guard:** `full` is not worse than `a` on any single category among `fact`, `jargon`,
+  `multi`, `style`, `updated`, `tool` and the anchor questions. `forgotten` is not part of the
+  guard; it is judged by G-10.
+- **Secondary, reported, not deciding:** the same difference per category. It sets the status of
+  C-8 per category in `06`.
+
+Outcomes:
+
+- **Fails, no gain:** the primary metric is not above `a` in P3 with the oracle teacher. Stop
+  building P4. Ship `a`, keep slabs only for style and persona (`core`), and record the decision.
+- **Fails, a loss:** the primary metric gains but some guarded category is worse than `a`.
+  Slabs are damaging recall-on answers; find the cause (gate leak, cap, stale slabs) before P4.
+  This is a defect to fix, not a reason to ship `a`.
+- **Passes:** build P4. C-8 is recorded as supported for the categories whose own interval
+  excludes zero and as not shown for the others.
 - If it passes in P3 but fails in P5 with the model teacher on a capable base, the teacher
   pipeline (P03 §3–4) is the problem, not the substrate; fix that before anything else.
 
@@ -187,6 +233,32 @@ from `04_BUILD_PLAN.md`.
 On the `dev` machine the 0.5B model makes long runs slow; cycle counts may be reduced for
 iteration, but a gate is only passed by the run size listed here.
 
+### 8.1 Feasibility before the pipeline (D-37, task T0.8)
+
+None of these run sizes has been timed. Before P1, `python -m neurolearn.eval.feasibility`
+measures on the target profile, with the real base model and no slab code:
+
+| Measured | How |
+|---|---|
+| Prefill and decode throughput | tokens per second on 512-token prompts and 96-token replies, KV cache on |
+| Training-step time | forward and backward at `train.batch_tokens` and `train.max_seq_tokens` through the frozen base with a throwaway rank-8 additive adapter on the `slabs.modules` (a stand-in with the same gradient path as a slab) |
+| Teacher-pass time | forward only, same batch, for the distillation targets |
+| Peak resident memory | of each of the above, and of serving and training together |
+| Disk | bytes per ledger entry (text, chunks, embeddings, derived rows) and per slab file |
+
+From these and the config counts (`derived_per_entry`, `epochs`, probes and anchor rows per
+commit test, `safety.eval_rows × decode_tokens`, entries per cycle of the stream) it projects
+the wall time of one L1 write, one commit test, one consolidation cycle, and each run in the
+table above, and writes `reports/feasibility_<profile>.md`. T1.7 repeats the step-time
+measurement with the real `train_slab` and corrects the projection.
+
+If a required run is projected above `eval.run_budget_hours` on `dev`, a decision record is
+written before P1. The expected answer is to run that gate on the GPU profile (D-42) and keep a
+reduced-size `dev` run as a mechanics check, labelled as such in its report. The other options
+are lowering per-entry sample counts or commit-test sample sizes (config changes with reasons)
+or changing the run size in the table. A gate is still passed only by a run of the size the
+table then lists, and T0.8 is repeated on the GPU profile at T5.1.
+
 ---
 
 ## 9. Invariants and tests
@@ -198,3 +270,5 @@ iteration, but a gate is only passed by the run size listed here.
 | I-P11-3 | `Engine.answer` leaves the ledger, slabs and sessions unchanged. | tiny |
 | I-P11-4 | The bare base scores at chance on `fact` questions with recall off (the world is unknown to it). | slow |
 | I-P11-5 | All systems receive identical streams and identical evaluation questions. | unit |
+| I-P11-6 | Every evaluation question carries its `fact_id`s; cluster assignment is a deterministic function of `truth.json`; a `multi` question is in the same cluster as both of its facts. | unit |
+| I-P11-7 | On a synthetic result set with perfectly correlated duplicates of each question, the cluster bootstrap interval has the same width as without the duplicates, and the per-question bootstrap is narrower. | unit |
