@@ -509,7 +509,8 @@ then confirm or replace), `superseded`.
   uncorrected checks give a 41% false-failure rate. Holm is chosen over the review's
   Benjamini-Hochberg because one rejection fails the guard, so the family-wise rate is the one
   that matters.
-- **Status:** decided. Refines D-40 and D-41.
+- **Status:** decided. Refines D-40 and D-41. How the guard's p-value is computed is replaced by
+  D-54 (the percentile p-value failed I-P11-9); the cluster rule and Holm stand.
 
 ### D-50 Gate arithmetic in float32; floor on calibration spread; GPU hazards registered
 - **Decision:** Standardisation, norms, energies and margins are computed in `float32` on every
@@ -609,6 +610,127 @@ then confirm or replace), `superseded`.
   needed a planted collision test). Cluster counts at 50 cycles, seeds 0 to 2: `jargon` 14 to 19,
   `multi` 10 to 18 (seed 2 at 10, the minimum), `style` 10, `fact` 28 to 41; at 200 cycles every
   category except `style` and `tool` has at least 26 clusters and a largest share of at most 8.7%.
+- **Status:** decided.
+
+### D-54 The guard's p-value comes from a wild cluster bootstrap; I-P11-9 is checked with a binomial test (T0.7)
+- **Decision:** (1) The one-sided "not worse" p-value of `P11` §5.1 (the guard, and a single
+  "not worse" comparison) is computed by a **wild cluster bootstrap with the null imposed**: each
+  draw multiplies every cluster's summed paired difference by an independent random sign
+  (Rademacher weight), separately per seed, and recomputes the seed-averaged difference;
+  `p = (1 + #{draws ≤ observed}) / (1 + draws)`. It replaces the percentile p-value (resample
+  clusters, count draws at or above zero). Holm's correction, the 5% family-wise level, the
+  seed averaging and the 10-cluster minimum are unchanged. (2) Percentile intervals stay for
+  "above baseline" and for the descriptive per-seed intervals; they run somewhat narrow with few
+  clusters (below), which is stated wherever they are reported. (3) I-P11-9's pass condition is
+  a test of the rate, not a point comparison: over 2,000 simulated runs the guard's failure count
+  must not be significantly above 5% (one-sided exact binomial test at 5%: at most 116), and the
+  uncorrected per-seed rule must fail far more often. (4) A category is left out of the guard if
+  it has fewer than 10 clusters on any seed. (5) The G-K primary metric resamples clusters within
+  each of its three categories (stratified); their clusters are disjoint by construction (jargon
+  terms, style rules, projects), and the code refuses overlapping ones.
+- **Why:** (1) Measured on null simulations (no true difference, 3 seeds, 7 categories, 1–8
+  questions per cluster): with the cluster counts of a 50-cycle stream (30, 15, 12, 10, 20, 10,
+  40 per seed) the percentile guard failed in 8.1% of 2,000 runs (8.6% with correlated
+  systems; 11.2% with 10 clusters in every category), against the 5% the procedure promises.
+  With 200 clusters per category it failed in 4.7% of 300 runs, so the implementation is right
+  and the excess is a small-sample property: a percentile bootstrap over `k` clusters
+  underestimates the variance by `(k−1)/k` and ignores the heavier tails of an estimated
+  variance. Under "no difference" the sign of a cluster's paired difference is as likely either
+  way, so the sign-flip draws reproduce the null distribution without that bias; the test is
+  exact when the two systems are exchangeable and is the method recommended for few clusters.
+  Measured false-failure rates of the wild guard: 4.1% (2,000 runs, 50-cycle counts), 4.5%
+  (correlated systems), 4.57% (8,000 runs, 10 clusters everywhere, 10,000 draws), 4.52%
+  (10,000 runs of the unit test's generator). (2) The same simulations put the per-seed
+  one-sided error of a nominal 2.5% percentile bound at about 3.5% (4% at 10 clusters). "Above
+  baseline" needs the bound on every one of 3 seeds, so a false pass stays near `0.04³`; no
+  change. (3) A calibrated procedure has a rate just under 5% (Holm over 7 independent tests:
+  at most 4.89%), and the estimate from 2,000 runs has a standard error of 0.5 points, so "at
+  most 5% of 2,000 runs" fails a correct guard by chance about one time in seven. The unit
+  test's fixed generator seed did exactly that: 101 of 2,000 (5.05%; binomial tail 0.47). The
+  seed was not changed and the level was not changed; the check was made a valid test. It still
+  rejects the percentile guard (an 8% rate gives about 160 of 2,000; at most 116 pass).
+- **Evidence:** `tests/unit/test_metrics.py::test_I_P11_9_…` (wild 101/2,000; uncorrected per-seed
+  rule 53.5%; percentile guard 10.8% on the first 500 runs; prints all three);
+  `test_I_P11_7_…` (cluster interval width 0.2933 with and without perfect duplicates;
+  per-question 0.0911). Simulation scripts were run from the session scratchpad and are not
+  kept; their generator is the unit test's `_null_seed`.
+- **Status:** decided. Replaces the p-value rule of D-49 (the rest of D-49 stands).
+
+### D-55 Evaluation harness and baseline `b` details fixed at T0.7
+- **Decision:** (1) **Delivery.** Chat turns go through `Engine.chat` in their stream session
+  (one engine session per stream session, ended when the next starts); file turns are written
+  to `work/inbox/` and passed to `Engine.ingest_file`. Until T4.8 tool turns and tool questions
+  go through without tools; until T4.5 forget requests are ordinary chat turns; until T4.6
+  updates are not superseded. Every report says so. (2) **Harness settings** (`RunParams`,
+  written to `run.json`, not config: they describe the benchmark): user `u1`; stream replies up
+  to 64 tokens; answers up to 48 tokens (§3), `style` questions up to 256, because a rule such
+  as a sign-off is checked at the end of the reply; questions are asked at 23:30 of the cycle
+  day; greedy decoding. (3) **Answer detail.** `Engine.answer_detail` returns the reply with
+  whether it ended within the limit, the recalled chunk and entry ids, and the wall time
+  (`answer` returns its text). Reports give the truncation rate per category, and for recall on
+  whether every gold source entry was recalled (a diagnostic that separates retrieval failures
+  from reading failures). (4) **Baseline `b`.** One rank-`slabs.rank` LoRA on `slabs.modules` in
+  every layer (`A` uniform in ±1/√d_in, `B = 0`, scale folded into `B`, no gate). At each
+  cycle's end it trains on that cycle's non-probe derived rows and the raw text of the entries
+  they cite, with next-token cross-entropy: `qa` in the student format of `P03` §6.1 with loss on
+  the answer and its end-of-turn token, `implication` as `[date] Note: <statement>` with loss on
+  the statement, raw entries as in `P03` §6.2. Every batch keeps the real-token share of D-10.
+  Optimiser settings are the slab's (`train.lr_slab`, `epochs`, `batch_tokens`,
+  `max_seq_tokens`, `max_grad_norm`, `weight_decay` on `B` only); AdamW and its cosine schedule
+  start fresh each cycle while the LoRA carries over (sequential). No replay, no anchor or safety
+  term. Entries without derived rows (filler, tool turns) are not trained, as in the full
+  system's recall-only rule (`P03` §4). Until T2.5 `b` requires `teacher.mode: oracle`.
+  (5) **Reference answers.** A system that changes weights also answers the anchor questions
+  with its weights off (the bare base) and reports anchor KL per cycle. (6) **Scoring details.**
+  Folding drops thousands separators between digits and turns other punctuation into spaces;
+  token F1 is taken over the best window of the reply of the gold's length; a reply is stale
+  when it holds the old value and not the new one; I-P11-4's chance rate is a uniform guess over
+  the generator's value pool for `status`, `role`, `preference` and jargon definitions, and 0
+  for invented or high-cardinality values, tested one-sided with the cluster bootstrap.
+  (7) **Files.** A run writes `run.json`, `answers.jsonl` (every answer, as it goes),
+  `cycles.jsonl` and `work/` (its own ledger) beside the files of §7; `report.build` re-scores
+  from the stored replies, so a scoring fix needs no model rerun.
+- **Why:** (1) The spec says the same stream runs through every system but not how each turn
+  type reaches a system that lacks the mechanism for it. (2) Stream replies are not scored; at
+  about 15 tokens/s on `dev` their length dominates a run's wall time, so they are short. A
+  48-token cap cuts most replies of the 0.5B base to a generic question before its end, which
+  would fail every end-of-reply rule whatever the model did. (4) The spec fixes the rank, the
+  absence of gating and replay, and "each cycle's samples"; the loss is the common sequential
+  fine-tuning baseline. Context distillation for `b` would need `P03`'s loss code (T1.6) and
+  would make `b` a slab without a gate; if that comparison is wanted it can be added as a
+  further system after T1.7.
+- **Evidence:** `tests/unit/test_eval_run.py` (tiny: I-P11-5, report files, hard rule 1 for `b`,
+  batch composition, CLI), `tests/unit/test_metrics.py`; runs linked from T0.7 in `04`.
+- **Status:** decided.
+
+### D-56 Feasibility harness details fixed at T0.8
+- **Decision:** (1) `neurolearn.eval.feasibility` measures the five things of `P11` §8.1 and also
+  the cost of one chat turn and one evaluation answer through `Engine` (recall off and on, and
+  `style`), and projects from those units and from counts taken from the stream itself. (2) The
+  stand-in for a slab is a plain rank-`slabs.rank` additive adapter (`B` small random, not zero,
+  so `A` gets a gradient) on `slabs.modules`, with next-token loss on every position of
+  `train.batch_tokens` tokens as `n` sequences of `train.max_seq_tokens`; it is removed after each
+  measurement and the base is never written. The teacher pass is a forward over the same batch.
+  (3) A training step of the full system is costed as that step plus a teacher or base pass over
+  the share of the batch that needs one (new and replay samples with their notes in context,
+  anchor text; `P03` §6.6 shares). (4) Everything the specs leave open is an `Assumptions` field
+  printed with its reason: the share of entries that trigger an L1 write, the size of an L1
+  write's light safety test (`P05` §3 says "reduced samples"), slabs per cycle, commit attempts,
+  and the sizes of E-GATE, E-STALE and E-MLP. (5) The probe sweep's whole-model safety test
+  (`P06` §6) is costed once per cycle. (6) Measurements are stored as JSON with the counts, and
+  the report is rebuilt from them; a rebuild refuses a configuration that differs in a key the
+  measurement depends on (model, dtype, slab rank and modules, batch shape, encoder, recall).
+- **Why:** (1) The harness is made of turns and answers; projecting them from raw token rates would
+  add assumptions about prompt lengths that the engine can simply measure. (4) The commit-test
+  safety measure decodes `safety.eval_rows` rows of `safety.decode_tokens` tokens, which at
+  `dev` speeds is the largest single item of any commit test, so the size of the L1 light test
+  can decide whether `full` is practical; the report shows the effect of changing it. (6) The
+  owner sets `eval.run_budget_hours`, and changing it must not need a 15-minute measurement.
+- **Not covered:** multi-entry derived samples, neighbour retries, forget rebuilds, compaction;
+  overlap of serving and a worker (D-23); the gate's cost in a real slab step (T1.7 repeats the
+  step measurement with `train_slab`). The report lists these under Limits.
+- **Evidence:** `tests/unit/test_feasibility.py` (34 tests on `tiny`; 17 of 18 deliberate
+  breakages caught). The benchmark itself is recorded at T0.8 in `04`.
 - **Status:** decided.
 
 ### Fourth review: items not adopted as defaults

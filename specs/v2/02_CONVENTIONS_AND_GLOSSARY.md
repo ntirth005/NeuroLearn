@@ -133,7 +133,17 @@ python -m neurolearn.cli compact     --config ...
 python -m neurolearn.cli forget      --config ... --user <name> "<query>"
 python -m neurolearn.cli status      --config ...
 python -m neurolearn.eval.run        --config ... --stream <seed> --cycles N --system full|a|b|c
+                                     [--teacher oracle|model] [--reports DIR] [--reply-tokens N]
+python -m neurolearn.eval.report     build <run_dir>
+python -m neurolearn.eval.report     compare --system <run_dir>... --baseline <run_dir>... [--out FILE]
+python -m neurolearn.eval.feasibility --config ... [--repeats N] [--out DIR] [--threads N]
+                                     [--check-run <run_dir> --check-cycles 7,8,9]
+python -m neurolearn.eval.feasibility --config ... --from-json <feasibility_<profile>.json>   # rebuild, no model
 ```
+
+`--teacher` overrides `teacher.mode` for that run; the resolved value is written to the run's
+`config.yaml`. A run writes to `<paths.data_dir>/reports/<run_id>/` and keeps its own ledger in
+`work/` there; it never touches the configured ledger (D-55).
 
 ## 7. Definition of done for any task
 

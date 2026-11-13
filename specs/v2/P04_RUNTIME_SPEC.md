@@ -249,6 +249,8 @@ class Engine:
              session_id: str | None = None) -> Iterator[str]: ...  # streams text
     def answer(self, user: str, question: str, recall: bool = True, tools: list[dict] | None = None,
                max_new_tokens: int = 48) -> str: ...               # read-only: no ledger append, no write, fresh session (P11 §3)
+    def answer_detail(self, ...same arguments...) -> "Answer": ... # answer's text plus: ended within the limit, recalled
+                                                                   # chunk and entry ids, prompt tokens, seconds (T0.7, D-55)
     def ingest_file(self, user: str, path: str, trainable: bool = True) -> int: ...   # trainable=False: recall-only (P10 §5)
     def end_session(self, session_id: str) -> None: ...
     def forget(self, user: str, query: str, confirm_ids: list[int] | None = None,

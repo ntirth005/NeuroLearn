@@ -11,7 +11,9 @@ exhausted or closed: finish iterating it before calling another engine method fr
 from __future__ import annotations
 
 import threading
+import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
@@ -28,6 +30,19 @@ from neurolearn.runtime.base import ChatTokenizer, freeze, load_base
 from neurolearn.runtime.session import Session, TurnRecord
 
 DEFAULT_CHAT_TOKENS = 256  # reply length limit of ``chat`` when the caller gives none
+
+
+@dataclass(frozen=True)
+class Answer:
+    """What ``Engine.answer_detail`` returns: the reply and how it was produced (P11 §3, §5)."""
+
+    text: str
+    n_tokens: int  # reply tokens decoded (the end-of-turn token is not counted)
+    ended: bool  # an end-of-turn token came within the limit; False means the reply was cut off
+    prompt_tokens: int
+    chunk_ids: tuple[int, ...]  # chunks recalled into the prompt (empty with recall off)
+    entry_ids: tuple[int, ...]  # their entries, in the same order
+    seconds: float  # wall time of recall, prefill and decode
 
 
 class Engine:
@@ -162,13 +177,18 @@ class Engine:
         probs = torch.softmax(logits / temperature, dim=-1)
         return int(torch.multinomial(probs, 1, generator=gen))
 
-    def _decode(self, s: Session, logits: torch.Tensor, max_new: int, temperature: float, seed: int
-                ) -> Iterator[tuple[list[int], str]]:
+    def _decode(self, s: Session, logits: torch.Tensor, max_new: int, temperature: float, seed: int,
+                reply: list[int] | None = None) -> Iterator[tuple[list[int], str]]:
         """Decode loop. Yields (reply ids so far, text delta). The last forward leaves the cache
-        covering every reply token; the stop token is never forwarded."""
+        covering every reply token; the stop token is never forwarded.
+
+        Reply ids are appended to ``reply`` when the caller passes a list, so the caller holds
+        every token even when the last ones produced no text delta (an incomplete UTF-8 sequence).
+        Fewer than ``max_new`` ids at the end means an end-of-turn token was sampled.
+        """
         tok = self.tokenizer
         gen = torch.Generator().manual_seed(seed) if temperature > 0 else None
-        reply: list[int] = []
+        reply = [] if reply is None else reply
         text = ""
         for _ in range(max_new):
             nxt = self._pick(logits, temperature, gen)
@@ -217,7 +237,7 @@ class Engine:
                 nll = float(F.cross_entropy(logits[:-1], targets))
                 # 6. decode
                 reply_ids: list[int] = []
-                for reply_ids, delta in self._decode(s, logits[-1], max_new_tokens, temperature, seed):
+                for _, delta in self._decode(s, logits[-1], max_new_tokens, temperature, seed, reply_ids):
                     yield delta
             except BaseException:
                 # an abandoned or failed turn must not leave a half-built context behind
@@ -244,9 +264,16 @@ class Engine:
                max_new_tokens: int = 48) -> str:
         """Greedy answer in a fresh session that is not kept. Appends nothing to the ledger,
         writes nothing, changes no session (P11 §3, I-P11-3)."""
+        return self.answer_detail(user, question, recall, tools, max_new_tokens).text
+
+    def answer_detail(self, user: str, question: str, recall: bool = True, tools: list[dict] | None = None,
+                      max_new_tokens: int = 48) -> Answer:
+        """``answer`` plus how the reply was produced: whether it ended within the limit, the
+        recalled chunks and the wall time (used by the evaluation harness, P11 §5)."""
         if tools:
             raise NotImplementedError("tool calls arrive with T4.8")
         with self._lock:
+            t0 = time.perf_counter()
             now = self._now()
             s = Session(id="answer", user=user, started_ts="", day=now.date().isoformat())
             s.token_ids = S.system_tokens(self.tokenizer, user, s.day)
@@ -254,15 +281,19 @@ class Engine:
             chunks, turn_ids, _ = self._plan_turn(s, question, [], recall, max_new_tokens)
             new = turn_ids + S.assistant_header(self.tokenizer)
             s.token_ids.extend(new)
+            prompt_tokens = len(s.token_ids)
+            reply: list[int] = []
             self.generating.set()
             try:
                 logits = self._forward(s, s.token_ids, [len(s.token_ids) - 1])
-                reply: list[int] = []
-                for reply, _ in self._decode(s, logits[-1], max_new_tokens, 0.0, 0):
+                for _ in self._decode(s, logits[-1], max_new_tokens, 0.0, 0, reply):
                     pass
             finally:
                 self.generating.clear()
-            return self.tokenizer.decode(reply).strip()
+            return Answer(text=self.tokenizer.decode(reply).strip(), n_tokens=len(reply),
+                          ended=len(reply) < max_new_tokens, prompt_tokens=prompt_tokens,
+                          chunk_ids=tuple(c.id for c in chunks), entry_ids=tuple(c.entry_id for c in chunks),
+                          seconds=time.perf_counter() - t0)
 
     # ---- files, status, shutdown ----------------------------------------------------------
 

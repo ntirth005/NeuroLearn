@@ -81,6 +81,19 @@ _MONTHS = ["January", "February", "March", "April", "May", "June", "July", "Augu
            "October", "November", "December"]
 
 
+# I-P11-4's "chance": a guess drawn uniformly from the generator's value pool. Only these attributes
+# draw from a pool of ordinary words a model could produce unprompted; every other value is an
+# invented word or one of at least 700 dates, ports or paths, so its chance rate is taken as 0.
+GUESS_POOLS = {"status": len(_STATUSES), "role": len(_LEVELS) * len(_FUNCTIONS),
+               "preference": len(_PREF_ADJ) * len(_PREF_THING), "definition": len(_J_ADJ) * len(_J_NOUN)}
+
+
+def chance_rate(fact: dict[str, Any]) -> float:
+    """Probability that a uniform guess from the attribute's value pool is the fact's value."""
+    n = GUESS_POOLS.get(fact["attribute"])
+    return 1.0 / n if n else 0.0
+
+
 def _word(rng: random.Random) -> str:
     n = rng.choice((2, 2, 3))
     parts = [rng.choice(_ONSET) + rng.choice(_VOWEL) for _ in range(n - 1)]

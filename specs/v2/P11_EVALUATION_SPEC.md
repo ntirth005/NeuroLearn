@@ -6,7 +6,9 @@ worth keeping.
 **Depends on:** P01; later the whole system through `Engine`
 **Provides to:** every phase gate
 **Code:** `neurolearn/eval/` — `synthetic_user.py`, `baselines.py`, `metrics.py`, `run.py`, `report.py`
-**Status:** `synthetic_user.py` implemented (T0.6); the rest specified, not implemented
+**Status:** implemented through T0.7: synthetic user (T0.6); metrics, clustered bootstrap, guard,
+G-K procedure, report writer, harness, baselines `a` and `b` (T0.7). Not yet: `full`,
+`full-noL1` (P2–P3), `c` (T3.6), probe-based metrics (T1.6), tools (T4.8), forgetting (T4.5).
 
 ---
 
@@ -86,7 +88,10 @@ Engine.answer(user, question, recall: bool, tools=None, max_new_tokens=48) -> st
 ```
 
 Each question is asked twice: `recall=False` (what the weights hold) and `recall=True` (the
-system as used). Question sets per cycle:
+system as used). The harness uses `Engine.answer_detail`, which returns the same reply plus
+whether it ended within the token limit, the recalled chunks and the wall time. How each turn
+type reaches a system, the harness settings (reply lengths: stream turns 64 tokens, answers 48,
+`style` questions 256) and what a run writes are fixed in D-55. Question sets per cycle:
 
 - **same-day:** facts stated this cycle (also asked *before* consolidation, to measure L1);
 - **lagged:** facts stated 1, 5, 10, 25, 50 cycles ago;
@@ -106,7 +111,10 @@ system as used). Question sets per cycle:
 | `c` | One LoRA retrained from scratch on all samples every cycle | Expensive upper bound for a single adapter |
 | `full-noL1` | `full` with L1 writes disabled | Experiment E-L1 |
 
-All use the same base, recall settings, derived samples and decode settings.
+All use the same base, recall settings, derived samples and decode settings. Baseline `b`'s
+initialisation, loss, data and optimiser schedule are fixed in D-55 (next-token cross-entropy on
+the cycle's derived rows and their entries, the slab's optimiser settings, a fresh optimiser each
+cycle). Until the model teacher exists (T2.5) `b` runs in `teacher.mode: oracle`.
 
 ---
 
@@ -114,11 +122,11 @@ All use the same base, recall settings, derived samples and decode settings.
 
 | Metric | Definition |
 |---|---|
-| **Accuracy** | Normalised exact match of the gold answer within the reply (case, whitespace, punctuation folded); token F1 also reported. Per category, per lag, recall off and on. |
+| **Accuracy** | Normalised exact match of the gold answer within the reply (case, whitespace, punctuation folded; the folded gold must be a run of whole tokens of the folded reply); token F1, over the best window of the reply of the gold's length, also reported. Per category, per lag, recall off and on. Details in D-55. |
 | **Probe pass rate** | P03 §5, on the system's own probes. |
 | **Plasticity** | Recall-off accuracy on same-day facts after consolidation. |
 | **Retention** | Recall-off accuracy at lag L divided by recall-off accuracy at lag 0 for the same facts; and mean retention ratio of probes. |
-| **Stale-answer rate** | Share of `updated` questions answered with the old value. |
+| **Stale-answer rate** | Share of `updated` questions answered with the old value (the old value is in the reply and the new one is not). |
 | **Forget: source removal** | Share of forgets whose byte search is clean (P08 §3.1). |
 | **Forget: behavioural removal** | Share of `forgotten` questions answered with the gold value, recall off and on, beside the bare base's share; and the forgotten facts' probe score minus the bare base's (P08 §3.3). Reported separately for facts stated once and facts stated twice. |
 | **Base preservation** | Anchor KL (P06 §5); accuracy on anchor questions vs the bare base. |
@@ -149,27 +157,36 @@ Resampling questions one by one would give intervals that are too narrow.
   `truth.json`, and the share of questions in the largest cluster is reported (I-P11-8).
 - **Paired cluster bootstrap.** For a comparison between two systems on one seed: resample
   clusters with replacement (10,000 draws), take every question of each drawn cluster for both
-  systems, and compute the difference. Report its 95% interval.
+  systems, and compute the difference. Report its 95% interval. With 10 to 40 clusters these
+  percentile intervals run somewhat narrow (a nominal 2.5% bound errs about 3.5% of the time,
+  D-54); read single-seed intervals with that in mind.
 - **Seeds.** Run 3 seeds. Report the interval **for each seed separately** and the number of
   clusters behind it. Three seeds are too few to resample; they are a replication check, not a
   sample.
 - **"Above baseline"** in any gate means: the interval excludes zero on every seed. A gate that
   holds on some seeds only is reported as mixed and does not pass.
 - **"Not worse", for one comparison:** the one-sided test "the difference is below zero" is not
-  significant at 5%.
+  significant at 5%. Its p-value comes from a **wild cluster bootstrap with the null imposed**
+  (D-54): each draw gives every cluster's summed paired difference a random sign and recomputes
+  the difference; `p = (1 + #{draws ≤ observed}) / (1 + draws)`. (A percentile p-value was
+  specified first; it failed I-P11-9.)
 - **"Not worse on any category" (a guard over several categories, D-49).** Checking every
   category on every seed separately would be many tests: 7 categories × 3 seeds at 2.5% each
-  give a 41% chance of at least one false failure when nothing is wrong. The guard is therefore
-  one family of tests: for each guarded category take the difference averaged over seeds
-  (resampling clusters within each seed, 100,000 draws), compute the one-sided bootstrap
-  p-value that it is below zero, and apply the Holm step-down correction across the categories
-  at a family-wise level of 5%. The guard fails only if some category is rejected after
-  correction. Holm is used instead of a false-discovery-rate procedure because a single
+  give a 41% chance of at least one false failure when nothing is wrong (53% measured with
+  percentile intervals over 10 to 40 clusters, D-54). The guard is therefore one family of
+  tests: for each guarded category take the difference averaged over seeds, compute the
+  one-sided p-value that it is below zero with the wild cluster bootstrap above (signs drawn
+  independently per seed, 100,000 draws), and apply the Holm step-down correction across the
+  categories at a family-wise level of 5%. The guard fails only if some category is rejected
+  after correction. Holm is used instead of a false-discovery-rate procedure because a single
   rejection fails the guard, so the error to control is "any false failure". Per-seed,
   uncorrected intervals are still reported for every category, marked as descriptive.
 - Report the cluster count next to every interval. A category with fewer than 10 clusters in a
   run is reported without a pass/fail and is left out of any "not worse on any category" guard,
-  with a note saying so.
+  with a note saying so (out of the guard if this holds on any seed).
+- **Several categories in one metric** (the G-K primary metric): clusters are resampled within
+  each category, so every draw has all of them; the categories' clusters must be disjoint, as
+  `jargon`, `style` and `multi` clusters are (terms, rules, projects).
 
 ---
 
@@ -236,9 +253,15 @@ Each run writes `data/reports/<run_id>/`:
 - `metrics.jsonl`: one row per (cycle, system, metric, category, lag, recall) with value and n
 - `events.jsonl`: copy of the ledger events
 - `summary.md`: gate table with measured value, threshold, pass/fail; plots optional
+- also (D-55): `run.json` (run metadata, harness settings, whether it completed), `answers.jsonl`
+  (one record per answer: question, reply, scores, whether it ended, recalled sources),
+  `cycles.jsonl` (per-cycle cost and training figures), and `work/` (the run's own ledger)
 
-`run_id` includes the git commit, seed and profile. A phase is closed by linking its `summary.md`
-from `04_BUILD_PLAN.md`.
+`run_id` is `<UTC time>-<profile>-<system>-s<seed>-c<cycles>-<commit>[-dirty]`. A phase is closed
+by linking its `summary.md` from `04_BUILD_PLAN.md`. `python -m neurolearn.eval.report build
+<run_dir>` rewrites `metrics.jsonl` and `summary.md` from the stored replies; `report compare
+--system <dirs> --baseline <dirs>` pairs runs seed by seed (refusing runs whose `truth.json`
+differ) and writes the paired intervals, the G-K primary metric and the guard.
 
 ---
 
@@ -282,6 +305,16 @@ are lowering per-entry sample counts or commit-test sample sizes (config changes
 or changing the run size in the table. A gate is still passed only by a run of the size the
 table then lists, and T0.8 is repeated on the GPU profile at T5.1.
 
+Details fixed at T0.8 (D-56). The command also times one chat turn and one evaluation answer
+(recall off and on, and `style`) through the real `Engine`, because those are the units the
+harness is made of. The stream's counts (turns, entries that state a fact, training tokens,
+questions, per cycle) are taken from the generator for each run size of §8 and stored with the
+measurements, so `--from-json` rebuilds the projection without a model. Every planning value the
+specs leave open (`Assumptions` in `feasibility.py`) is printed with its reason, and a table shows
+how `P3` `full` moves when the main ones change. `--check-run` compares predicted with observed
+seconds for cycles of an earlier harness run that ran alone. The report is
+`<paths.data_dir>/reports/feasibility_<profile>.md` beside a `.json` of the raw measurements.
+
 ---
 
 ## 9. Invariants and tests
@@ -295,5 +328,5 @@ table then lists, and T0.8 is repeated on the GPU profile at T5.1.
 | I-P11-5 | All systems receive identical streams and identical evaluation questions. | unit |
 | I-P11-6 | Every evaluation question carries its `fact_id`s and its answer's `object_id`; cluster assignment is a deterministic function of `truth.json`; a `multi` question is in exactly one cluster, that of its answer's object. | unit |
 | I-P11-8 | In every generated stream the largest cluster holds at most 10% of the questions of its category, for categories with at least 20 clusters (below that the cap cannot be met, D-53); the figure is written to the report for every category. | unit |
-| I-P11-9 | On synthetic results with no true difference in any of 7 categories, the guard fails in at most 5% of 2,000 simulated runs; the uncorrected per-seed rule fails in far more, and both rates are reported by the test. | unit |
+| I-P11-9 | On synthetic results with no true difference in any of 7 categories, the guard's false-failure count over 2,000 simulated runs is not significantly above 5% (one-sided exact binomial test at 5%: at most 116; D-54); the uncorrected per-seed rule fails in far more, and both rates are reported by the test. | unit |
 | I-P11-7 | On a synthetic result set with perfectly correlated duplicates of each question, the cluster bootstrap interval has the same width as without the duplicates, and the per-question bootstrap is narrower. | unit |
